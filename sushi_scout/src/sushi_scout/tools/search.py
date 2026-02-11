@@ -3,7 +3,7 @@
 from typing import Annotated, Any
 
 import httpx
-from arcade_mcp_server import Context
+from arcade_mcp_server import Context, tool
 from arcade_mcp_server.auth import Google
 
 PLACES_BASE_URL = "https://places.googleapis.com/v1/places"
@@ -109,88 +109,86 @@ def _format_restaurant_details(place: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def register_tools(app):
-    """Register search tools with the MCP app."""
-
-    @app.tool(
-        requires_auth=Google(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
+@tool(
+    requires_auth=Google(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
-    async def search_nearby_restaurants(
-        context: Context,
-        latitude: Annotated[float, "Latitude of the search center"],
-        longitude: Annotated[float, "Longitude of the search center"],
-        radius_miles: Annotated[float, "Search radius in miles (max ~31)"] = 2.0,
-    ) -> Annotated[dict, "List of nearby sushi/Japanese restaurants with metadata"]:
-        """Search for sushi and Japanese restaurants near a location.
+)
+async def search_nearby_restaurants(
+    context: Context,
+    latitude: Annotated[float, "Latitude of the search center"],
+    longitude: Annotated[float, "Longitude of the search center"],
+    radius_miles: Annotated[float, "Search radius in miles (max ~31)"] = 2.0,
+) -> Annotated[dict, "List of nearby sushi/Japanese restaurants with metadata"]:
+    """Search for sushi and Japanese restaurants near a location.
 
-        Returns restaurants with ratings, price ranges, and location data.
-        Use this as the first step to find cheap tuna rolls nearby.
-        """
-        oauth_token = context.get_auth_token_or_empty()
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {oauth_token}",
-            "X-Goog-FieldMask": ",".join(SEARCH_FIELDS),
-        }
+    Returns restaurants with ratings, price ranges, and location data.
+    Use this as the first step to find cheap tuna rolls nearby.
+    """
+    oauth_token = context.get_auth_token_or_empty()
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {oauth_token}",
+        "X-Goog-FieldMask": ",".join(SEARCH_FIELDS),
+    }
 
-        payload = {
-            "includedTypes": ["japanese_restaurant", "sushi_restaurant"],
-            "maxResultCount": 10,
-            "locationRestriction": {
-                "circle": {
-                    "center": {"latitude": latitude, "longitude": longitude},
-                    "radius": _miles_to_meters(radius_miles),
-                }
-            },
-        }
+    payload = {
+        "includedTypes": ["japanese_restaurant", "sushi_restaurant"],
+        "maxResultCount": 10,
+        "locationRestriction": {
+            "circle": {
+                "center": {"latitude": latitude, "longitude": longitude},
+                "radius": _miles_to_meters(radius_miles),
+            }
+        },
+    }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{PLACES_BASE_URL}:searchNearby",
-                json=payload,
-                headers=headers,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-        places = data.get("places", [])
-        restaurants = [_format_restaurant(p, i) for i, p in enumerate(places)]
-
-        return {
-            "count": len(restaurants),
-            "radius_miles": radius_miles,
-            "center": {"latitude": latitude, "longitude": longitude},
-            "restaurants": restaurants,
-        }
-
-    @app.tool(
-        requires_auth=Google(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{PLACES_BASE_URL}:searchNearby",
+            json=payload,
+            headers=headers,
         )
+        response.raise_for_status()
+        data = response.json()
+
+    places = data.get("places", [])
+    restaurants = [_format_restaurant(p, i) for i, p in enumerate(places)]
+
+    return {
+        "count": len(restaurants),
+        "radius_miles": radius_miles,
+        "center": {"latitude": latitude, "longitude": longitude},
+        "restaurants": restaurants,
+    }
+
+
+@tool(
+    requires_auth=Google(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
-    async def get_restaurant_details(
-        context: Context,
-        place_id: Annotated[str, "Google Places ID of the restaurant"],
-    ) -> Annotated[dict, "Detailed restaurant information including hours and reviews"]:
-        """Get detailed information about a specific restaurant.
+)
+async def get_restaurant_details(
+    context: Context,
+    place_id: Annotated[str, "Google Places ID of the restaurant"],
+) -> Annotated[dict, "Detailed restaurant information including hours and reviews"]:
+    """Get detailed information about a specific restaurant.
 
-        Returns delivery availability, hours, reviews, and more.
-        Use this after search_nearby_restaurants to get details for a specific place.
-        """
-        oauth_token = context.get_auth_token_or_empty()
-        headers = {
-            "Authorization": f"Bearer {oauth_token}",
-            "X-Goog-FieldMask": ",".join(DETAIL_FIELDS),
-        }
+    Returns delivery availability, hours, reviews, and more.
+    Use this after search_nearby_restaurants to get details for a specific place.
+    """
+    oauth_token = context.get_auth_token_or_empty()
+    headers = {
+        "Authorization": f"Bearer {oauth_token}",
+        "X-Goog-FieldMask": ",".join(DETAIL_FIELDS),
+    }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{PLACES_BASE_URL}/{place_id}",
-                headers=headers,
-            )
-            response.raise_for_status()
-            data = response.json()
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{PLACES_BASE_URL}/{place_id}",
+            headers=headers,
+        )
+        response.raise_for_status()
+        data = response.json()
 
-        return _format_restaurant_details(data)
+    return _format_restaurant_details(data)

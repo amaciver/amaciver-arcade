@@ -1,8 +1,11 @@
 """Synthetic menu data layer - generates realistic sushi menus calibrated to real price data."""
 
 import hashlib
+import json
 import random
 from typing import Annotated, Any
+
+from arcade_mcp_server import tool
 
 
 # Price calibration based on Google Places priceLevel
@@ -135,86 +138,82 @@ def generate_menu_for_restaurant(restaurant: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def register_tools(app):
-    """Register menu tools with the MCP app."""
+@tool
+async def get_restaurant_menu(
+    restaurant_id: Annotated[str, "Google Places ID of the restaurant"],
+    restaurant_name: Annotated[str, "Name of the restaurant"] = "",
+    price_level: Annotated[str | None, "Price level from search results"] = None,
+    price_range_low: Annotated[int | None, "Low end of price range in dollars"] = None,
+    delivery: Annotated[bool | None, "Whether restaurant offers delivery"] = None,
+) -> Annotated[dict, "Restaurant menu with tuna roll options and prices"]:
+    """Get the menu for a restaurant, including tuna roll options with prices.
 
-    @app.tool
-    async def get_restaurant_menu(
-        restaurant_id: Annotated[str, "Google Places ID of the restaurant"],
-        restaurant_name: Annotated[str, "Name of the restaurant"] = "",
-        price_level: Annotated[str | None, "Price level from search results"] = None,
-        price_range_low: Annotated[int | None, "Low end of price range in dollars"] = None,
-        delivery: Annotated[bool | None, "Whether restaurant offers delivery"] = None,
-    ) -> Annotated[dict, "Restaurant menu with tuna roll options and prices"]:
-        """Get the menu for a restaurant, including tuna roll options with prices.
+    Menu data is synthetically generated but calibrated to the restaurant's
+    real price tier from Google Places. Prices are deterministic per restaurant.
+    """
+    restaurant = {
+        "id": restaurant_id,
+        "name": restaurant_name,
+        "price_level": price_level,
+        "price_range_low": price_range_low,
+        "delivery": delivery,
+    }
+    return generate_menu_for_restaurant(restaurant)
 
-        Menu data is synthetically generated but calibrated to the restaurant's
-        real price tier from Google Places. Prices are deterministic per restaurant.
-        """
-        restaurant = {
-            "id": restaurant_id,
-            "name": restaurant_name,
-            "price_level": price_level,
-            "price_range_low": price_range_low,
-            "delivery": delivery,
-        }
-        return generate_menu_for_restaurant(restaurant)
 
-    @app.tool
-    async def find_cheapest_tuna_roll(
-        restaurants_json: Annotated[
-            str,
-            "JSON string of restaurant list from search_nearby_restaurants "
-            "(the 'restaurants' array from the response)",
-        ],
-    ) -> Annotated[dict, "Ranked list of cheapest tuna rolls across all restaurants"]:
-        """Find the cheapest tuna roll across multiple restaurants.
+@tool
+async def find_cheapest_tuna_roll(
+    restaurants_json: Annotated[
+        str,
+        "JSON string of restaurant list from search_nearby_restaurants "
+        "(the 'restaurants' array from the response)",
+    ],
+) -> Annotated[dict, "Ranked list of cheapest tuna rolls across all restaurants"]:
+    """Find the cheapest tuna roll across multiple restaurants.
 
-        Takes the restaurant list from search_nearby_restaurants and generates
-        menus for each, then ranks all available tuna rolls by price.
+    Takes the restaurant list from search_nearby_restaurants and generates
+    menus for each, then ranks all available tuna rolls by price.
 
-        Returns the cheapest options with restaurant details and delivery info.
-        """
-        import json
+    Returns the cheapest options with restaurant details and delivery info.
+    """
+    try:
+        restaurants = json.loads(restaurants_json)
+    except (json.JSONDecodeError, TypeError):
+        return {"error": "Invalid JSON. Pass the 'restaurants' array as a JSON string."}
 
-        try:
-            restaurants = json.loads(restaurants_json)
-        except (json.JSONDecodeError, TypeError):
-            return {"error": "Invalid JSON. Pass the 'restaurants' array as a JSON string."}
+    all_options: list[dict[str, Any]] = []
 
-        all_options: list[dict[str, Any]] = []
+    for restaurant in restaurants:
+        menu = generate_menu_for_restaurant(restaurant)
 
-        for restaurant in restaurants:
-            menu = generate_menu_for_restaurant(restaurant)
+        for item in menu["tuna_rolls"]:
+            if not item["available"]:
+                continue
 
-            for item in menu["tuna_rolls"]:
-                if not item["available"]:
-                    continue
+            all_options.append({
+                "restaurant_name": menu["restaurant_name"],
+                "restaurant_id": menu["restaurant_id"],
+                "item_name": item["name"],
+                "price": item["price"],
+                "pieces": item["pieces"],
+                "price_per_piece": round(item["price"] / item["pieces"], 2),
+                "delivery_available": menu["delivery_available"],
+                "delivery_time_minutes": menu["delivery_time_minutes"],
+                "delivery_fee": menu["delivery_fee"],
+                "total_with_delivery": round(
+                    item["price"] + (menu["delivery_fee"] or 0), 2
+                ),
+            })
 
-                all_options.append({
-                    "restaurant_name": menu["restaurant_name"],
-                    "restaurant_id": menu["restaurant_id"],
-                    "item_name": item["name"],
-                    "price": item["price"],
-                    "pieces": item["pieces"],
-                    "price_per_piece": round(item["price"] / item["pieces"], 2),
-                    "delivery_available": menu["delivery_available"],
-                    "delivery_time_minutes": menu["delivery_time_minutes"],
-                    "delivery_fee": menu["delivery_fee"],
-                    "total_with_delivery": round(
-                        item["price"] + (menu["delivery_fee"] or 0), 2
-                    ),
-                })
+    # Sort by price (cheapest first)
+    all_options.sort(key=lambda x: x["price"])
 
-        # Sort by price (cheapest first)
-        all_options.sort(key=lambda x: x["price"])
+    cheapest = all_options[0] if all_options else None
 
-        cheapest = all_options[0] if all_options else None
-
-        return {
-            "cheapest": cheapest,
-            "all_options": all_options,
-            "total_restaurants_checked": len(restaurants),
-            "total_options_found": len(all_options),
-            "note": "Prices are synthetic but calibrated to each restaurant's real price tier",
-        }
+    return {
+        "cheapest": cheapest,
+        "all_options": all_options,
+        "total_restaurants_checked": len(restaurants),
+        "total_options_found": len(all_options),
+        "note": "Prices are synthetic but calibrated to each restaurant's real price tier",
+    }
