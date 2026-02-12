@@ -70,11 +70,11 @@ Server starts at `http://127.0.0.1:8000`. Connect your MCP client to that URL.
 uv run pytest -v
 ```
 
-31 tests, all passing:
+34 tests, all passing:
 
 ```
 tests/test_facts.py  - 11 tests (parsing, count clamping, API URL, empty responses)
-tests/test_slack.py  - 12 tests (formatting, auth, message sending, payloads)
+tests/test_slack.py  - 15 tests (formatting, auth.test, conversations.open, message sending)
 tests/test_evals.py  -  8 tests (end-to-end workflows, edge cases, formatting)
 ```
 
@@ -98,6 +98,7 @@ tests/test_evals.py  -  8 tests (end-to-end workflows, edge cases, formatting)
 │                                           │
 │  meow_me             (Slack OAuth)        │
 │    ├── auth.test → get your user ID       │
+│    ├── conversations.open → open DM       │
 │    ├── MeowFacts → fetch a fact           │
 │    └── chat.postMessage → DM yourself     │
 │                                           │
@@ -115,7 +116,7 @@ tests/test_evals.py  -  8 tests (end-to-end workflows, edge cases, formatting)
 | Tool | Auth | Description |
 |------|------|-------------|
 | `get_cat_fact` | None | Fetch 1-5 random cat facts from MeowFacts API |
-| `meow_me` | Slack OAuth (`chat:write`, `users:read`) | Fetch a cat fact and DM it to yourself |
+| `meow_me` | Slack OAuth (`chat:write`, `im:write`) | Fetch a cat fact and DM it to yourself |
 | `send_cat_fact` | Slack OAuth (`chat:write`) | Send 1-3 cat facts to a specific channel |
 
 ---
@@ -155,7 +156,7 @@ The Slack tools use Arcade's **built-in Slack OAuth provider** - no manual app c
 | Scope | Used by |
 |-------|---------|
 | `chat:write` | `meow_me`, `send_cat_fact` - post messages to channels/DMs |
-| `users:read` | `meow_me` - look up your own user ID for self-DM |
+| `im:write` | `meow_me` - open a DM conversation via `conversations.open` |
 
 ---
 
@@ -165,7 +166,7 @@ The Slack tools use Arcade's **built-in Slack OAuth provider** - no manual app c
 |----------|--------|-----------|
 | External API | MeowFacts | Free, no auth, returns structured JSON |
 | Slack auth | Arcade built-in Slack provider | Zero setup - demonstrates Arcade's core OAuth value |
-| Self-DM pattern | `auth.test` → `chat.postMessage(user_id)` | Posting to a user ID opens a DM automatically |
+| Self-DM pattern | `auth.test` → `conversations.open` → `chat.postMessage` | Proper DM channel creation via Slack API |
 | Count limits | get_cat_fact: 1-5, send_cat_fact: 1-3 | Prevent spam while allowing batch sends |
 
 ---

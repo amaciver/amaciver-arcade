@@ -148,14 +148,14 @@ tests/test_evals.py     - 10 tests (price tiers, ranking, real API patterns, per
 
 ```
 get_cat_fact   (no auth)        → MeowFacts API → random facts
-meow_me        (Slack OAuth)    → auth.test + MeowFacts + chat.postMessage → DM self
+meow_me        (Slack OAuth)    → auth.test + conversations.open + MeowFacts + chat.postMessage → DM self
 send_cat_fact  (Slack OAuth)    → MeowFacts + chat.postMessage → send to channel
 ```
 
 ### Auth
 
 Slack tools use Arcade's **built-in Slack provider**: `from arcade_mcp_server.auth import Slack`
-- `Slack(scopes=["chat:write", "users:read"])` for self-DM
+- `Slack(scopes=["chat:write", "im:write"])` for self-DM (im:write needed for conversations.open)
 - `Slack(scopes=["chat:write"])` for channel send
 
 ---
@@ -188,10 +188,10 @@ uv run arcade mcp -p meow_me http --debug
 
 ---
 
-## Testing (31 tests, all passing)
+## Testing (34 tests, all passing)
 
 ```
 tests/test_facts.py  - 11 tests (parsing, count clamping, API URL, empty responses)
-tests/test_slack.py  - 12 tests (formatting, auth, message sending, payloads)
+tests/test_slack.py  - 15 tests (formatting, auth.test, conversations.open, message sending)
 tests/test_evals.py  -  8 tests (end-to-end workflows, edge cases, formatting)
 ```

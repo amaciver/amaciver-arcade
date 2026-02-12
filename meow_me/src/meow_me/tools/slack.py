@@ -83,7 +83,7 @@ async def _send_slack_message(token: str, channel: str, text: str) -> dict:
     }
 
 
-@tool(requires_auth=Slack(scopes=["chat:write"]))
+@tool(requires_auth=Slack(scopes=["chat:write", "im:write"]))
 async def meow_me(
     context: Context,
 ) -> dict:
