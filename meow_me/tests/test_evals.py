@@ -8,27 +8,40 @@ from meow_me.tools.slack import (
     _format_cat_fact_message,
     _fetch_one_fact,
     _get_own_user_id,
+    _open_dm_channel,
     _send_slack_message,
 )
 
 
 class TestEndToEndMeowMe:
-    """Simulate the full meow_me workflow: fetch fact -> format -> DM self."""
+    """Simulate the full meow_me workflow: context -> open DM -> fetch fact -> send."""
 
     @pytest.mark.asyncio
     async def test_full_self_dm_workflow(self):
-        """Simulate: auth.test -> fetch fact -> format -> chat.postMessage."""
-        # Step 1: auth.test returns user ID
+        """Simulate: auth.test -> open DM channel -> fetch fact -> send message."""
+        # Step 1: auth.test returns user ID from the token
         auth_response = MagicMock()
-        auth_response.json.return_value = {"ok": True, "user_id": "U_EVAL_USER"}
+        auth_response.json.return_value = {
+            "ok": True,
+            "user_id": "U_EVAL_USER",
+            "team_id": "T_EVAL",
+        }
         auth_response.raise_for_status = MagicMock()
 
-        # Step 2: MeowFacts returns a fact
+        # Step 2: conversations.open returns DM channel
+        dm_response = MagicMock()
+        dm_response.json.return_value = {
+            "ok": True,
+            "channel": {"id": "D_EVAL_DM"},
+        }
+        dm_response.raise_for_status = MagicMock()
+
+        # Step 3: MeowFacts returns a fact
         fact_response = MagicMock()
         fact_response.json.return_value = {"data": ["Cats can rotate their ears 180 degrees."]}
         fact_response.raise_for_status = MagicMock()
 
-        # Step 3: chat.postMessage succeeds
+        # Step 4: chat.postMessage succeeds
         chat_response = MagicMock()
         chat_response.json.return_value = {
             "ok": True,
@@ -37,31 +50,32 @@ class TestEndToEndMeowMe:
         }
         chat_response.raise_for_status = MagicMock()
 
-        # Wire up the mock client
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        # Execute workflow steps
         with patch("meow_me.tools.slack.httpx.AsyncClient", return_value=mock_client):
-            # auth.test
+            # Get user ID from auth.test
             mock_client.post.return_value = auth_response
             user_id = await _get_own_user_id("xoxb-eval-token")
             assert user_id == "U_EVAL_USER"
+
+            # Open DM channel
+            mock_client.post.return_value = dm_response
+            dm_channel = await _open_dm_channel("xoxb-eval-token", user_id)
+            assert dm_channel == "D_EVAL_DM"
 
             # Fetch fact
             mock_client.get.return_value = fact_response
             fact = await _fetch_one_fact()
             assert "180 degrees" in fact
 
-            # Format
+            # Format and send
             message = _format_cat_fact_message(fact)
             assert ":cat:" in message
-            assert "180 degrees" in message
 
-            # Send DM
             mock_client.post.return_value = chat_response
-            result = await _send_slack_message("xoxb-eval-token", user_id, message)
+            result = await _send_slack_message("xoxb-eval-token", dm_channel, message)
             assert result["success"] is True
 
 

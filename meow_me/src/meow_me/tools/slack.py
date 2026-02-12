@@ -10,6 +10,20 @@ SLACK_API_BASE = "https://slack.com/api"
 MEOWFACTS_URL = "https://meowfacts.herokuapp.com/"
 
 
+async def _get_own_user_id(token: str) -> str:
+    """Get the authenticated user's Slack ID via auth.test."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{SLACK_API_BASE}/auth.test",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        data = response.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"Slack auth.test failed: {data.get('error', 'unknown')}")
+    return data["user_id"]
+
+
 def _format_cat_fact_message(fact: str) -> str:
     """Format a cat fact for Slack with emoji."""
     return f":cat: *Meow Fact:*\n{fact}"
@@ -25,18 +39,22 @@ async def _fetch_one_fact() -> str:
     return facts[0] if facts else "Cats are amazing!"
 
 
-async def _get_own_user_id(token: str) -> str:
-    """Get the authenticated user's Slack user ID via auth.test."""
+async def _open_dm_channel(token: str, user_id: str) -> str:
+    """Open a DM channel with a user via conversations.open."""
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"{SLACK_API_BASE}/auth.test",
-            headers={"Authorization": f"Bearer {token}"},
+            f"{SLACK_API_BASE}/conversations.open",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"users": user_id},
         )
         response.raise_for_status()
         data = response.json()
     if not data.get("ok"):
-        raise RuntimeError(f"Slack auth.test failed: {data.get('error', 'unknown')}")
-    return data["user_id"]
+        raise RuntimeError(f"Slack conversations.open failed: {data.get('error', 'unknown')}")
+    return data["channel"]["id"]
 
 
 async def _send_slack_message(token: str, channel: str, text: str) -> dict:
@@ -65,26 +83,29 @@ async def _send_slack_message(token: str, channel: str, text: str) -> dict:
     }
 
 
-@tool(requires_auth=Slack(scopes=["chat:write", "users:read"]))
+@tool(requires_auth=Slack(scopes=["chat:write"]))
 async def meow_me(
     context: Context,
 ) -> dict:
-    """Fetch a random cat fact and DM it to yourself on Slack.
+    """Send a random cat fact as a Slack DM to yourself.
 
-    Uses Arcade's Slack OAuth to authenticate, then sends a cat fact
-    as a direct message to the authenticated user.
+    Automatically identifies you from the Slack auth token, opens a DM
+    conversation, and sends you a random cat fact.
     """
     token = context.get_auth_token_or_empty()
 
-    # Get the user's own Slack ID
+    # Get the authenticated user's ID from the token
     user_id = await _get_own_user_id(token)
+
+    # Open a DM channel with the user
+    dm_channel = await _open_dm_channel(token, user_id)
 
     # Fetch a random cat fact
     fact = await _fetch_one_fact()
 
-    # DM it to yourself (posting to a user ID opens a DM)
+    # Send the fact as a DM
     message = _format_cat_fact_message(fact)
-    result = await _send_slack_message(token, user_id, message)
+    result = await _send_slack_message(token, dm_channel, message)
     result["fact"] = fact
     result["recipient"] = user_id
     return result
