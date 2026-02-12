@@ -1,4 +1,12 @@
-"""Restaurant search tool using Google Places API via Arcade OAuth."""
+"""Restaurant search tools using Google Places API.
+
+Uses GOOGLE_PLACES_API_KEY (via requires_secrets) for Places API calls.
+Google Maps APIs authenticate with API keys, not OAuth tokens, and the
+cloud-platform scope isn't in Arcade's default Google provider anyway.
+
+Arcade Google OAuth is demonstrated separately via get_user_profile,
+which uses the supported userinfo.email scope.
+"""
 
 from typing import Annotated, Any
 
@@ -109,11 +117,7 @@ def _format_restaurant_details(place: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@tool(
-    requires_auth=Google(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-)
+@tool(requires_secrets=["GOOGLE_PLACES_API_KEY"])
 async def search_nearby_restaurants(
     context: Context,
     latitude: Annotated[float, "Latitude of the search center"],
@@ -125,10 +129,10 @@ async def search_nearby_restaurants(
     Returns restaurants with ratings, price ranges, and location data.
     Use this as the first step to find cheap tuna rolls nearby.
     """
-    oauth_token = context.get_auth_token_or_empty()
+    api_key = context.get_secret("GOOGLE_PLACES_API_KEY")
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {oauth_token}",
+        "X-Goog-Api-Key": api_key,
         "X-Goog-FieldMask": ",".join(SEARCH_FIELDS),
     }
 
@@ -163,11 +167,7 @@ async def search_nearby_restaurants(
     }
 
 
-@tool(
-    requires_auth=Google(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-)
+@tool(requires_secrets=["GOOGLE_PLACES_API_KEY"])
 async def get_restaurant_details(
     context: Context,
     place_id: Annotated[str, "Google Places ID of the restaurant"],
@@ -177,9 +177,9 @@ async def get_restaurant_details(
     Returns delivery availability, hours, reviews, and more.
     Use this after search_nearby_restaurants to get details for a specific place.
     """
-    oauth_token = context.get_auth_token_or_empty()
+    api_key = context.get_secret("GOOGLE_PLACES_API_KEY")
     headers = {
-        "Authorization": f"Bearer {oauth_token}",
+        "X-Goog-Api-Key": api_key,
         "X-Goog-FieldMask": ",".join(DETAIL_FIELDS),
     }
 
@@ -192,3 +192,36 @@ async def get_restaurant_details(
         data = response.json()
 
     return _format_restaurant_details(data)
+
+
+@tool(
+    requires_auth=Google(
+        scopes=["https://www.googleapis.com/auth/userinfo.email", "openid"]
+    )
+)
+async def get_user_profile(
+    context: Context,
+) -> Annotated[dict, "Authenticated user's Google profile information"]:
+    """Get the authenticated user's Google profile.
+
+    Demonstrates Arcade's Google OAuth flow with supported scopes.
+    Returns the user's email and basic profile info after they
+    complete the OAuth authorization in their browser.
+    """
+    token = context.get_auth_token_or_empty()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers=headers,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    return {
+        "email": data.get("email"),
+        "name": data.get("name"),
+        "picture": data.get("picture"),
+        "verified": data.get("verified_email"),
+    }
