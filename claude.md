@@ -134,3 +134,64 @@ tests/test_menu.py      - 15 tests (generation, calibration, delivery consistenc
 tests/test_ordering.py  -  6 tests (order IDs, cost math, response structure)
 tests/test_evals.py     - 10 tests (price tiers, ranking, real API patterns, performance)
 ```
+
+---
+
+# PROJECT: Meow Me
+
+**Name:** `meow-me`
+**Goal:** MCP server that fetches random cat facts and Slack DMs them to you via Arcade's built-in Slack OAuth.
+
+---
+
+## Architecture
+
+```
+get_cat_fact   (no auth)        → MeowFacts API → random facts
+meow_me        (Slack OAuth)    → auth.test + MeowFacts + chat.postMessage → DM self
+send_cat_fact  (Slack OAuth)    → MeowFacts + chat.postMessage → send to channel
+```
+
+### Auth
+
+Slack tools use Arcade's **built-in Slack provider**: `from arcade_mcp_server.auth import Slack`
+- `Slack(scopes=["chat:write", "users:read"])` for self-DM
+- `Slack(scopes=["chat:write"])` for channel send
+
+---
+
+## MCP Tools (3 total)
+
+| Tool | Module | Auth | Description |
+|------|--------|------|-------------|
+| `get_cat_fact` | facts.py | None | Fetch 1-5 random cat facts |
+| `meow_me` | slack.py | Slack OAuth | Fetch fact + DM yourself |
+| `send_cat_fact` | slack.py | Slack OAuth | Send 1-3 facts to a channel |
+
+---
+
+## Commands
+
+```bash
+# Run tests
+cd meow_me && uv run pytest -v
+
+# Demo mode (no Slack needed)
+uv run python -m meow_me --demo
+
+# MCP server (STDIO for Claude Desktop)
+uv run arcade mcp -p meow_me stdio
+
+# MCP server (HTTP for Cursor/VS Code)
+uv run arcade mcp -p meow_me http --debug
+```
+
+---
+
+## Testing (31 tests, all passing)
+
+```
+tests/test_facts.py  - 11 tests (parsing, count clamping, API URL, empty responses)
+tests/test_slack.py  - 12 tests (formatting, auth, message sending, payloads)
+tests/test_evals.py  -  8 tests (end-to-end workflows, edge cases, formatting)
+```
