@@ -132,8 +132,8 @@ def print_restaurants(restaurants: list[dict[str, Any]]):
     for i, r in enumerate(restaurants, 1):
         delivery = "delivers" if r.get("delivery") else "no delivery"
         rating = r.get("rating", "N/A")
-        price = r.get("price_level", "N/A")
-        if isinstance(price, str):
+        price = r.get("price_level") or "N/A"
+        if price != "N/A":
             price = price.replace("PRICE_LEVEL_", "").lower()
         print(f"  {i}. {r['name']:<30} rating={rating}  {price:<15} {delivery}")
     print()
@@ -166,7 +166,7 @@ def print_winner(cheapest: dict[str, Any]):
     print(f"  Price:       ${cheapest['price']:.2f}")
     print(f"  Pieces:      {cheapest['pieces']}")
     print(f"  Per piece:   ${cheapest['price_per_piece']:.2f}")
-    if cheapest["delivery_available"]:
+    if cheapest["delivery_available"] and cheapest.get("delivery_fee") is not None:
         print(f"  Delivery:    ${cheapest['delivery_fee']:.2f} fee, ~{cheapest['delivery_time_minutes']} min")
         print(f"  Total:       ${cheapest['total_with_delivery']:.2f} (with delivery)")
     else:
@@ -192,7 +192,7 @@ def simulate_order(cheapest: dict[str, Any], delivery_address: str):
     print(f"  Tax:           ${tax:.2f}")
     print(f"  Total:         ${total:.2f}")
     print(f"  Deliver to:    {delivery_address}")
-    print(f"  Est. delivery: ~{cheapest.get('delivery_time_minutes', 30)} minutes")
+    print(f"  Est. delivery: ~{cheapest.get('delivery_time_minutes') or 30} minutes")
     print()
     print("  Note: This is a simulated order. No real order was placed.")
     print()

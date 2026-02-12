@@ -220,6 +220,57 @@ class TestEdgeCaseEvals:
         for item in menu["tuna_rolls"]:
             assert item["price"] > 0
 
+    def test_eval_real_api_data_pattern(self):
+        """Simulate realistic Google Places API response where many fields are None.
+
+        In real API results, most restaurants have no delivery flag and some
+        lack price_level. The pipeline should handle this without errors.
+        """
+        # Modeled after actual SF API results from our testing
+        restaurants = [
+            {"id": "real_1", "name": "Mensho Tokyo SF",
+             "price_level": "PRICE_LEVEL_MODERATE", "price_range_low": 20, "delivery": None},
+            {"id": "real_2", "name": "Parking Garage @ Japan Center",
+             "price_level": None, "price_range_low": None, "delivery": None},
+            {"id": "real_3", "name": "Rintaro",
+             "price_level": "PRICE_LEVEL_EXPENSIVE", "price_range_low": 60, "delivery": None},
+            {"id": "real_4", "name": "Benihana",
+             "price_level": "PRICE_LEVEL_EXPENSIVE", "price_range_low": None, "delivery": None},
+        ]
+
+        all_options = []
+        for r in restaurants:
+            menu = generate_menu_for_restaurant(r)
+
+            # Core invariant: delivery fields must be consistent
+            if menu["delivery_available"]:
+                assert menu["delivery_time_minutes"] is not None
+                assert menu["delivery_fee"] is not None
+            else:
+                assert menu["delivery_time_minutes"] is None
+                assert menu["delivery_fee"] is None
+
+            for item in menu["tuna_rolls"]:
+                assert item["price"] > 0
+                if item["available"]:
+                    all_options.append({
+                        "restaurant_name": menu["restaurant_name"],
+                        "price": item["price"],
+                        "delivery_available": menu["delivery_available"],
+                        "delivery_fee": menu["delivery_fee"],
+                        "total_with_delivery": round(
+                            item["price"] + (menu["delivery_fee"] or 0), 2
+                        ),
+                    })
+
+        all_options.sort(key=lambda x: x["price"])
+        assert len(all_options) >= 4, "Should find tuna rolls at most restaurants"
+
+        # Expensive restaurants should not be cheapest
+        cheapest = all_options[0]
+        assert cheapest["restaurant_name"] != "Rintaro", \
+            "Expensive restaurant should not be cheapest"
+
     def test_eval_many_restaurants_performance(self):
         """Should handle a large number of restaurants without issues."""
         restaurants = [

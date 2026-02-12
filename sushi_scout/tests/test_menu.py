@@ -161,6 +161,32 @@ class TestDeliveryInfo:
         assert menu["delivery_time_minutes"] is None
         assert menu["delivery_fee"] is None
 
+    def test_unknown_delivery_generates_consistent_data(self):
+        """When delivery is None (unknown from API), delivery fields should be consistent.
+
+        If delivery_available is randomly True, delivery_time and fee must also be set.
+        If delivery_available is False, they must both be None.
+        """
+        # Test many times since the fallback is random
+        for i in range(20):
+            restaurant = {
+                "id": f"test_unknown_delivery_{i}",
+                "name": f"Unknown Delivery {i}",
+                "price_level": "PRICE_LEVEL_MODERATE",
+                "price_range_low": 20,
+                "delivery": None,
+            }
+            menu = generate_menu_for_restaurant(restaurant)
+            if menu["delivery_available"]:
+                assert menu["delivery_time_minutes"] is not None, \
+                    f"delivery_available=True but delivery_time is None for restaurant {i}"
+                assert menu["delivery_fee"] is not None, \
+                    f"delivery_available=True but delivery_fee is None for restaurant {i}"
+                assert menu["delivery_fee"] > 0
+            else:
+                assert menu["delivery_time_minutes"] is None
+                assert menu["delivery_fee"] is None
+
     def test_menu_includes_synthetic_note(self):
         """Menu should clearly indicate data is synthetic."""
         restaurant = {"id": "test", "name": "Test", "price_level": None, "delivery": True}

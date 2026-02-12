@@ -124,14 +124,15 @@ def generate_menu_for_restaurant(restaurant: dict[str, Any]) -> dict[str, Any]:
             "available": rng.random() > 0.05,
         })
 
-    delivery_time = _generate_delivery_time(base_rng) if delivery else None
+    delivers = delivery if delivery is not None else base_rng.random() > 0.3
+    delivery_time = _generate_delivery_time(base_rng) if delivers else None
 
     return {
         "restaurant_id": place_id,
         "restaurant_name": name,
-        "delivery_available": delivery if delivery is not None else base_rng.random() > 0.3,
+        "delivery_available": delivers,
         "delivery_time_minutes": delivery_time,
-        "delivery_fee": round(base_rng.uniform(1.99, 5.99), 2) if delivery_time else None,
+        "delivery_fee": round(base_rng.uniform(1.99, 5.99), 2) if delivers else None,
         "tuna_rolls": tuna_items,
         "other_items": other_items,
         "menu_note": "Menu data is synthetic, calibrated to restaurant price tier",
