@@ -19,427 +19,242 @@ Evaluation Criteria
 Your project will be evaluated based on:
 Functionality: The tool(s) and application/agent work as you intended and deliver meaningful features.
 Code Quality: Follows best practices and the linting/editorconfig standards provided by your arcade new project scaffold, and your application follows similar standards.
-Testing: Your tests are comprehensive and accurately validate your toolkit’s functionality.
+Testing: Your tests are comprehensive and accurately validate your toolkit's functionality.
 Documentation: Clear instructions and documentation are provided.
 Originality: Your toolkit is unique from existing Arcade AI toolkits, and your application does something useful or interesting.
 Tips for Success
 Plan Before Coding: Outline the functionality you want to build; plan how the arcade new generated scaffold can help you.
 Focus on Core Features: Due to the 6-hour limit, implement the features with the highest impact.
 Ensure Reproducibility: Anyone should be able to clone your repo and run the toolkit without issues.
-Document Your Work: Clear, concise documentation will help others understand your toolkit’s usage and benefits. Provide images or videos if that helps.
+Document Your Work: Clear, concise documentation will help others understand your toolkit's usage and benefits. Provide images or videos if that helps.
 On Site or Remote
 If you are interested in compressing your interview experience to a single day, you can do the take-home assignment from our office in San Francisco! You can work on the assignment in the morning, and then we can review it with you in the afternoon. Lunch will be included.
 
 ---
 
-# PROJECT PLAN: Cheap Sushi Finder & Orderer
+# PROJECT: Sushi Scout - Cheap Tuna Roll Finder & Orderer
 
 ## Project Concept
-**Name:** `sushi-scout` (or `tuna-hunter`, `sushi-deal-finder`)
 
-**Goal:** Build an MCP server and agentic application that finds the cheapest plain tuna sushi roll available for delivery within a specified radius, with optional ordering capability.
+**Name:** `sushi-scout`
 
-**Value Prop:** Combines location-based search, price comparison, and real-time availability checking - showcases API integration, data processing, and actionable decision-making in a practical use case.
+**Goal:** MCP server and CLI agent that finds the cheapest plain tuna sushi roll available for delivery within a specified radius, with optional simulated ordering.
 
----
-
-## Architecture
-
-### MCP Server: `sushi-scout-mcp`
-**Tools to Expose:**
-1. `search_nearby_restaurants(location, radius_miles, cuisine_filter)`
-   - Returns list of Japanese/sushi restaurants in radius
-   - Uses Google Places API or similar
-
-2. `get_restaurant_menu(restaurant_id, platform)`
-   - Fetches menu data from delivery platform
-   - Extracts sushi roll items with prices
-
-3. `find_cheapest_tuna_roll(location, radius_miles)`
-   - Orchestrates search → menu fetch → price comparison
-   - Returns ranked list with availability, price, delivery time
-
-4. `place_order(restaurant_id, item_id, delivery_address)` *(stretch goal)*
-   - Initiates order through delivery platform
-   - Requires OAuth authentication
-   - Returns order confirmation
-
-### Agent/Application Layer
-**Framework:** Choose between:
-- **OpenAI Agents SDK** (simple, well-documented)
-- **LangChain** (more mature ecosystem)
-- **Custom implementation** (lightweight, full control)
-
-**Flow:**
-```
-User: "Find me the cheapest tuna roll within 2 miles of 123 Main St"
-  ↓
-Agent uses MCP tools:
-  1. search_nearby_restaurants(location="123 Main St", radius_miles=2, cuisine="sushi")
-  2. For each restaurant → get_restaurant_menu(restaurant_id)
-  3. find_cheapest_tuna_roll() to aggregate & rank
-  ↓
-Agent responds: "Found 5 options. Cheapest: $6.99 at Sushi Palace (15 min delivery)"
-  ↓
-User: "Order it"
-  ↓
-Agent: place_order() [if implemented]
-```
+**Value Prop:** Combines real location-based restaurant search (Google Places API), synthetic price-calibrated menus, and mock ordering into a multi-tool MCP server that demonstrates API integration, data processing, Arcade's `requires_secrets` and OAuth patterns, and actionable decision-making.
 
 ---
 
-## API Integration Strategy (FINALIZED)
+## Architecture (Implemented)
 
-### Research Completed
-We tested all viable APIs for real menu/pricing data:
+### 3-Layer Design
+
+```
+Layer 1: Restaurant Discovery (REAL DATA - Google Places API)
+  - search_nearby_restaurants (lat, lng, radius -> 10 sushi restaurants)
+  - get_restaurant_details   (place_id -> hours, reviews, delivery info)
+  - Auth: requires_secrets=["GOOGLE_PLACES_API_KEY"] (API key via X-Goog-Api-Key header)
+
+Layer 2: Menu & Pricing (SYNTHETIC, CALIBRATED)
+  - get_restaurant_menu      (place_id + price_level -> deterministic menu)
+  - find_cheapest_tuna_roll  (restaurants JSON -> ranked price comparison)
+  - Auth: None (pure computation)
+
+Layer 3: Ordering (SIMULATED)
+  - place_order              (restaurant + item + address -> mock confirmation)
+  - check_order_status       (order_id -> mock timeline)
+  - Auth: None (mock data)
+
+OAuth Demo:
+  - get_user_profile         (Google OAuth -> user email/name)
+  - Auth: requires_auth=Google(scopes=["userinfo.email", "openid"])
+```
+
+### Auth Strategy (Evolved)
+
+**What we planned:** Use Arcade's Google OAuth (`cloud-platform` scope) for Places API calls.
+
+**What we discovered:** The `cloud-platform` scope is NOT supported by Arcade's default Google provider. Supported scopes are limited to: calendar, contacts, drive.file, gmail, userinfo, openid.
+
+**What we implemented:**
+- **Search tools** use `requires_secrets=["GOOGLE_PLACES_API_KEY"]` - Google Maps APIs authenticate with API keys, not OAuth tokens. The secret is injected via Arcade's `context.get_secret()` mechanism (reads from `.env` or environment variables).
+- **`get_user_profile`** uses `requires_auth=Google(scopes=["userinfo.email", "openid"])` - demonstrates Arcade's OAuth flow with a supported scope. Calls the Google userinfo endpoint to return the authenticated user's email and profile.
+
+```python
+# Search tools: API key via requires_secrets
+@tool(requires_secrets=["GOOGLE_PLACES_API_KEY"])
+async def search_nearby_restaurants(context: Context, latitude: float, longitude: float, radius_miles: float = 2.0):
+    api_key = context.get_secret("GOOGLE_PLACES_API_KEY")
+    headers = {"X-Goog-Api-Key": api_key, ...}
+
+# OAuth demo: Arcade Google OAuth with supported scope
+@tool(requires_auth=Google(scopes=["https://www.googleapis.com/auth/userinfo.email", "openid"]))
+async def get_user_profile(context: Context):
+    token = context.get_auth_token_or_empty()
+    headers = {"Authorization": f"Bearer {token}"}
+```
+
+### Tool Registration Pattern
+
+Tools use the **module-level `@tool` decorator** from `arcade_mcp_server`. We originally used `@app.tool` inside `register_tools(app)` closures (from the scaffold), but discovered that `arcade mcp` CLI cannot discover tools defined inside closures - they must be at module scope.
+
+```python
+# server.py - imports trigger @tool registration
+from arcade_mcp_server import MCPApp
+app = MCPApp(name="sushi_scout", version="0.1.0", log_level="DEBUG")
+import sushi_scout.tools.search   # noqa: E402, F401
+import sushi_scout.tools.menu     # noqa: E402, F401
+import sushi_scout.tools.ordering # noqa: E402, F401
+```
+
+---
+
+## MCP Tools (7 total)
+
+| Tool | Module | Params | Auth | Description |
+|------|--------|--------|------|-------------|
+| `search_nearby_restaurants` | search.py | `latitude`, `longitude`, `radius_miles=2.0` | API key | Find sushi restaurants by location |
+| `get_restaurant_details` | search.py | `place_id` | API key | Get hours, reviews, delivery info |
+| `get_user_profile` | search.py | *(none)* | Google OAuth | Get authenticated user's email/name |
+| `get_restaurant_menu` | menu.py | `restaurant_id`, `restaurant_name=""`, `price_level=None`, `price_range_low=None`, `delivery=None` | None | Generate price-calibrated menu |
+| `find_cheapest_tuna_roll` | menu.py | `restaurants_json` (JSON string) | None | Rank tuna rolls across restaurants |
+| `place_order` | ordering.py | `restaurant_id`, `restaurant_name`, `item_name`, `item_price`, `delivery_address`, `delivery_fee=0.0`, `special_instructions=""` | None | Simulate delivery order |
+| `check_order_status` | ordering.py | `order_id` | None | Check simulated order status |
+
+---
+
+## Repository Structure (Actual)
+
+```
+amaciver-arcade/
+├── sushi_scout/                  # MCP server package (scaffolded with `arcade new`)
+│   ├── src/sushi_scout/
+│   │   ├── __init__.py
+│   │   ├── __main__.py           # python -m sushi_scout entry point
+│   │   ├── server.py             # MCPApp, imports tool modules
+│   │   ├── agent.py              # CLI demo agent (demo + live modes)
+│   │   └── tools/
+│   │       ├── __init__.py
+│   │       ├── search.py         # Google Places API tools + OAuth demo
+│   │       ├── menu.py           # Synthetic menu generation
+│   │       └── ordering.py       # Mock ordering flow
+│   ├── tests/
+│   │   ├── __init__.py
+│   │   ├── conftest.py           # Shared fixtures (real SF API response data)
+│   │   ├── test_search.py        # 14 tests: formatting, conversion
+│   │   ├── test_menu.py          # 14 tests: generation, calibration, ranking
+│   │   ├── test_ordering.py      #  6 tests: order IDs, cost math
+│   │   └── test_evals.py         #  9 tests: price tiers, edge cases, perf
+│   ├── test_oauth_flow.py        # Interactive OAuth test via STDIO MCP
+│   ├── pyproject.toml
+│   └── .env.example
+├── api_testing/                  # API validation scripts (from research phase)
+├── README.md                     # User-facing documentation
+├── DEVELOPMENT_NOTES.md          # Detailed development log
+├── claude.md                     # This file
+└── .gitignore
+```
+
+---
+
+## API Research Summary
+
+We evaluated 10+ APIs for real menu/pricing data:
 
 | API | Menu Items? | Prices? | Access | Verdict |
 |-----|------------|---------|--------|---------|
 | Google Places (New) | No | Price range only | Self-serve | **Use for discovery** |
 | Google Business Profile | Yes | Yes | Owner-only | Can't read others' menus |
 | OpenMenu | Yes (25M items) | Likely | "Contact us" | No free tier |
-| Yelp Fusion | No | $/$$/$$$  | Paid ($8-15/1K) | Supplement only |
+| Yelp Fusion | No | $/$$/$$$ | Paid ($8-15/1K) | Supplement only |
 | DoorDash/UberEats/Grubhub | N/A | N/A | Merchant-only | Not viable |
 
-**Conclusion:** No free public API provides structured menu items with prices for arbitrary restaurants.
-
-### Finalized 3-Layer Architecture
-
-**Layer 1: Restaurant Discovery (REAL DATA - Google Places API via Arcade OAuth)**
-- Search sushi restaurants by location + radius
-- Get ratings, delivery flags, price ranges ($20-30, $100+), hours
-- User authenticates via Arcade's Google OAuth provider
-- No shared API key needed - uses per-user identity
-- Tested and confirmed: 10 restaurants found in SF with rich metadata
-
-**Layer 2: Menu Data (SYNTHETIC - Context-Aware)**
-- Seeded menu database with realistic sushi items and prices
-- Prices calibrated to restaurant's real `priceRange` from Google Places
-  - PRICE_LEVEL_MODERATE ($20-30) -> tuna rolls $8-12
-  - PRICE_LEVEL_EXPENSIVE ($100+) -> tuna rolls $16-24
-- Includes availability, delivery time estimates, variations (regular/spicy/deluxe)
-
-**Layer 3: Ordering (SIMULATED)**
-- Mock order placement with realistic confirmation flow
-- Shows OAuth patterns, multi-step workflows, error handling
-
-### Auth Strategy: Arcade Google OAuth (PRIMARY)
-```python
-@tool
-async def search_nearby_restaurants(context: Context, location: str, radius_miles: float):
-    # Get user's Google OAuth token from Arcade's auth framework
-    token = await context.get_oauth_token("google")
-    headers = {"Authorization": f"Bearer {token}"}
-    # Call Google Places API with user identity - no shared API key
-```
-
-**Why this approach:**
-- Demonstrates Arcade's core auth value proposition
-- Per-user authorization (production pattern)
-- No secrets in the repo
-- Shows understanding of Arcade's Context/OAuth model
-- API key fallback available for testing/CI via env var
-
-### What This Demonstrates
-- Real API integration (Google Places)
-- Arcade's OAuth framework (Google auth provider)
-- Data modeling and price estimation logic
-- Clear separation of real vs simulated layers
-- Production-ready auth patterns
-
----
-
-## Repository Structure
-
-```
-amaciver-arcade/
-├── sushi-scout-mcp/           # MCP Server (created with `arcade new`)
-│   ├── src/
-│   │   ├── sushi_scout/
-│   │   │   ├── __init__.py
-│   │   │   ├── server.py      # MCPApp definition
-│   │   │   ├── tools/         # Tool implementations
-│   │   │   │   ├── search.py
-│   │   │   │   ├── menu.py
-│   │   │   │   ├── ordering.py
-│   │   │   ├── services/      # External API clients
-│   │   │   │   ├── yelp_client.py
-│   │   │   │   ├── places_client.py
-│   │   │   ├── models/        # Data models
-│   │   │   │   ├── restaurant.py
-│   │   │   │   ├── menu_item.py
-│   │   ├── tests/
-│   │   │   ├── test_tools.py
-│   │   │   ├── test_services.py
-│   │   │   ├── fixtures/      # Mock API responses
-│   │   ├── evals/
-│   │   │   ├── test_scenarios.py
-│   │   │   ├── eval_results/
-│   ├── pyproject.toml
-│   ├── README.md
-│   ├── .env.example
-│
-├── sushi-agent/               # Agent application
-│   ├── src/
-│   │   ├── agent.py           # Main agent logic
-│   │   ├── config.py
-│   ├── tests/
-│   ├── requirements.txt
-│   ├── README.md
-│
-├── README.md                  # Root README
-├── claude.md                  # This file
-├── demo/                      # Screenshots, video
-├── ARCHITECTURE.md            # Design decisions
-```
-
----
-
-## Development Workflow
-
-### Phase 1: Setup (30 min)
-- [ ] Run `arcade new sushi-scout-mcp`
-- [ ] Set up Yelp Fusion API account & key
-- [ ] Set up Google Places API account & key (optional)
-- [ ] Configure environment variables
-- [ ] Initialize agent application structure
-
-### Phase 2: MCP Server - Core Tools (2 hours)
-- [ ] Implement `search_nearby_restaurants` tool
-  - Integrate Yelp API client
-  - Handle location geocoding
-  - Filter by cuisine type
-- [ ] Create synthetic menu database
-  - Seed with realistic sushi restaurant menus
-  - Include tuna roll variants with prices
-- [ ] Implement `get_restaurant_menu` tool
-  - Query synthetic data
-  - Return structured menu items
-- [ ] Implement `find_cheapest_tuna_roll` tool
-  - Orchestrate search + menu fetch
-  - Price comparison logic
-  - Rank by price, availability, delivery time
-
-### Phase 3: Agent Application (1 hour)
-- [ ] Set up MCP client connection
-- [ ] Implement conversational flow
-- [ ] Handle user queries (location, radius)
-- [ ] Display results in readable format
-- [ ] Add follow-up actions (order simulation)
-
-### Phase 4: Testing (1.5 hours)
-- [ ] Unit tests for each tool
-  - Mock API responses
-  - Test edge cases (no results, API errors)
-- [ ] Integration tests
-  - End-to-end tool orchestration
-  - Agent + MCP server integration
-- [ ] Create eval scenarios
-  - Different locations (urban, suburban)
-  - Different radius sizes
-  - Price variance scenarios
-  - Availability edge cases
-
-### Phase 5: Documentation & Polish (1 hour)
-- [ ] Write comprehensive README
-  - Installation instructions
-  - API key setup
-  - Usage examples
-  - Screenshots/demo video
-- [ ] Document architecture decisions
-- [ ] Code cleanup & linting
-- [ ] Add inline documentation
-- [ ] Create demo materials
-
-### Phase 6: Stretch Goals (if time permits)
-- [ ] Real OAuth implementation (Yelp)
-- [ ] Actual ordering flow (simulated)
-- [ ] Multi-platform support
-- [ ] Caching layer for API responses
-- [ ] Web UI for the agent
-
----
-
-## Testing & Evaluation Strategy
-
-### Unit Tests
-**Coverage:** Each tool independently
-```python
-# tests/test_tools.py
-def test_search_nearby_restaurants_success()
-def test_search_nearby_restaurants_no_results()
-def test_search_nearby_restaurants_invalid_location()
-def test_get_restaurant_menu_success()
-def test_find_cheapest_tuna_roll_ranking()
-```
-
-### Integration Tests
-**Coverage:** Multi-tool workflows
-```python
-# tests/test_integration.py
-def test_full_search_and_compare_workflow()
-def test_agent_completes_order_flow()
-```
-
-### Evaluation Scenarios
-**Using Arcade's eval framework:**
-```python
-# evals/test_scenarios.py
-scenarios = [
-    {
-        "name": "urban_area_high_density",
-        "location": "San Francisco, CA",
-        "radius": 1.0,
-        "expected_min_results": 5
-    },
-    {
-        "name": "suburban_area_low_density",
-        "location": "Suburb XYZ",
-        "radius": 5.0,
-        "expected_min_results": 2
-    },
-    {
-        "name": "price_comparison_accuracy",
-        "expected_cheapest": "Restaurant A",
-        "expected_price": 6.99
-    }
-]
-```
-
-**Metrics to Track:**
-- Tool selection accuracy
-- Response time
-- API error handling
-- Price ranking correctness
-- User satisfaction (qualitative)
-
----
-
-## API Keys & Environment Variables
-
-**Primary auth: Arcade Google OAuth (no API key needed for end users)**
-- Users authenticate via Arcade's built-in Google auth provider
-- Tool retrieves OAuth token at runtime via `context.get_oauth_token("google")`
-
-**Fallback for testing/CI:**
-```bash
-# .env (gitignored - never committed)
-GOOGLE_PLACES_API_KEY=your_google_key  # Fallback for local testing only
-ARCADE_API_KEY=your_arcade_key         # For Arcade platform access
-```
-
-**Setup Instructions:**
-1. Arcade: Register at arcade.dev, get API key
-2. Google (fallback only): https://console.cloud.google.com -> Enable Places API (New) -> Create API key
+**Conclusion:** No free public API provides structured menu items with prices for arbitrary restaurants. Our synthetic menus are calibrated to each restaurant's real `priceRange` from Google Places.
 
 ---
 
 ## Key Design Decisions
 
-### Why Synthetic Menu Data?
-**Rationale:** No reliable public API for real-time menu/pricing from delivery platforms. Creating a seeded database allows us to:
-- Demonstrate data processing logic
-- Ensure reproducible test results
-- Avoid API rate limits during demos
-- Focus on the agent orchestration (core value)
-
-**Trade-off:** Not production-ready, but perfect for interview/demo scope.
-
-### Why Mock Ordering?
-**Rationale:** Actual ordering requires:
-- Production API access (limited availability)
-- Payment processing (PCI compliance)
-- Legal liability concerns
-- Significantly more development time
-
-**Mock implementation shows:**
-- OAuth patterns
-- Multi-step workflows
-- Error handling
-- User confirmation flows
-
-### Agent Framework Choice
-**Recommendation:** Start with OpenAI Agents SDK
-- Simple, minimal boilerplate
-- Good documentation
-- Native MCP support
-- Easy to explain in interview
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Primary API | Google Places (New) | Rich restaurant data; tested with 10 SF results |
+| Search auth | `requires_secrets` (API key) | Google Maps uses API keys; `cloud-platform` OAuth scope isn't in Arcade's default Google provider |
+| OAuth demo | `get_user_profile` with `userinfo.email` | Demonstrates Arcade's OAuth flow with a scope that actually works |
+| Menu data | Synthetic, calibrated to `priceRange` | No free menu API exists; calibration makes prices realistic |
+| Ordering | Mock/simulated | Delivery platforms have no public ordering APIs |
+| Tool registration | Module-level `@tool` | `arcade mcp` CLI can't discover tools inside closures |
+| Agent framework | Custom CLI | Lightweight, focused on demonstrating MCP tool usage |
+| Determinism | Seeded RNG per `place_id` | Same restaurant always gets same menu (reproducible tests) |
 
 ---
 
-## Success Criteria
+## Testing (44 tests, all passing)
 
-**Must Have:**
-✅ MCP server with 3+ working tools
-✅ Agent that successfully orchestrates tool calls
-✅ Real API integration (Yelp/Places)
-✅ Comprehensive tests (>80% coverage)
-✅ Clear documentation
-✅ Runnable by cloning repo
+```
+tests/test_search.py    - 14 tests (miles-to-meters, place formatting, detail formatting)
+tests/test_menu.py      - 14 tests (menu generation, price calibration, delivery, cheapest-finding)
+tests/test_ordering.py  -  6 tests (order ID format/uniqueness, cost breakdown math)
+tests/test_evals.py     -  9 tests (urban/suburban scenarios, price tier ordering, edge cases, perf)
+```
 
-**Nice to Have:**
-⭐ OAuth implementation
-⭐ Demo video
-⭐ Eval harness with multiple scenarios
-⭐ Clean, polished UI (if web-based)
+Run: `cd sushi_scout && uv run pytest -v`
 
 ---
 
-## Time Allocation (6 hours)
+## Environment Variables
 
-| Phase | Time | Priority |
-|-------|------|----------|
-| Setup & scaffolding | 0.5h | P0 |
-| MCP server core tools | 2.0h | P0 |
-| Agent application | 1.0h | P0 |
-| Testing | 1.5h | P0 |
-| Documentation | 1.0h | P0 |
-| **TOTAL** | **6.0h** | |
+```bash
+# .env (gitignored)
+GOOGLE_PLACES_API_KEY=your_key    # Required for search tools (via requires_secrets)
+ARCADE_API_KEY=your_arcade_key    # For Arcade platform access
+```
+
+The API key is injected into tools via Arcade's `context.get_secret()` mechanism. It reads from `.env` files and environment variables automatically.
 
 ---
 
 ## Development Guidelines for Claude/LLM Assistants
 
-When working on this project:
-
-1. **Always run tests after changes** - Use `pytest` in the MCP server directory
-2. **Follow Arcade's scaffold conventions** - Don't fight the generated structure
+1. **Always run tests after changes** - `cd sushi_scout && uv run pytest -v`
+2. **Use module-level `@tool` decorator** - NOT `@app.tool` inside closures (arcade CLI can't discover those)
 3. **Prefer composition over complexity** - Keep tools focused, single-purpose
-4. **Document API decisions** - Note why we chose Yelp, why mock data, etc.
-5. **Use type hints** - Critical for MCP server tools
-6. **Handle errors gracefully** - Network failures, API limits, invalid inputs
-7. **Keep agent prompts simple** - Don't over-engineer the agent logic
+4. **Use type hints with `Annotated`** - Critical for MCP server tool parameter descriptions
+5. **Handle errors gracefully** - Network failures, API limits, invalid inputs
+6. **Windows encoding** - Always set `PYTHONIOENCODING=utf-8` for subprocess calls; use `errors="replace"` for stdout
+7. **MCP transports** - HTTP for browser-based testing, STDIO for OAuth flows (OAuth tools can't run over HTTP transport)
 8. **Commit frequently** - Small, atomic commits with clear messages
-9. **Update this file** - As decisions change, keep claude.md current
+9. **Update this file** - Keep claude.md current as decisions evolve
 
 ---
 
 ## Resolved Decisions
 
 - [x] **Project name:** sushi-scout
-- [x] **Primary API:** Google Places (New) via Arcade Google OAuth
-- [x] **Menu data:** Synthetic, calibrated to real priceRange from Google Places
-- [x] **Auth strategy:** Arcade Google OAuth (primary), API key fallback (testing/CI)
+- [x] **Primary API:** Google Places (New) via API key (`requires_secrets`)
+- [x] **OAuth demo:** `get_user_profile` with `userinfo.email` scope (supported by Arcade)
+- [x] **Menu data:** Synthetic, calibrated to real `priceRange` from Google Places
+- [x] **Auth for search:** API key (not OAuth - `cloud-platform` scope unsupported)
 - [x] **No Yelp needed:** Google Places provides everything (ratings, delivery, price range, reviews)
 - [x] **Ordering:** Mock/simulated with realistic flows
+- [x] **Agent framework:** Custom CLI (lightweight, no framework overhead)
+- [x] **Demo format:** CLI demo mode with `--demo` flag
+- [x] **Tool registration:** Module-level `@tool`, not `@app.tool` closures
+- [x] **Scaffold:** `arcade new sushi_scout` works well, adapted structure
 
-## Open Questions / TODOs
+## Open Questions / Remaining Work
 
-- [ ] Agent framework: OpenAI SDK vs LangChain vs custom?
-- [ ] Demo format: CLI only, web UI, or video walkthrough?
-- [ ] Arcade Google OAuth: confirm exact scope needed for Places API
-- [ ] Confirm `arcade new` scaffold structure matches our needs
+- [ ] Run full interactive OAuth test (`test_oauth_flow.py`) to confirm `userinfo.email` flow end-to-end
+- [ ] Demo format: video walkthrough TBD
+- [ ] Final polish: review README for accuracy, add any missing setup steps
 
 ---
 
-## Next Steps
+## What This Project Demonstrates
 
-1. Run `arcade new sushi-scout-mcp` to scaffold the MCP server
-2. Explore the scaffold structure, understand conventions
-3. Implement `search_nearby_restaurants` tool with Arcade Google OAuth
-4. Build synthetic menu data layer
-5. Implement `find_cheapest_tuna_roll` orchestration tool
-6. Write tests
-7. Build agent application
-8. Documentation and polish
-
+1. **Real API integration** - Google Places (New) for restaurant discovery with live data
+2. **Arcade's `requires_secrets` pattern** - API keys injected via `context.get_secret()`
+3. **Arcade's OAuth framework** - Google auth via `requires_auth=Google(scopes=[...])` with supported scopes
+4. **Data modeling** - Synthetic menu generation calibrated to real price tiers
+5. **Deterministic computation** - Seeded RNG for reproducible menus per restaurant
+6. **Multi-tool orchestration** - Search -> menu -> price comparison -> ordering workflow
+7. **Comprehensive testing** - 44 tests covering units, calibration, evals, and edge cases
+8. **MCP protocol** - Tested over both HTTP and STDIO transports

@@ -14,13 +14,13 @@ Sushi Scout searches for sushi restaurants near a location, generates price-cali
                         │ MCP Protocol
 ┌───────────────────────▼─────────────────────────────┐
 │              Sushi Scout MCP Server                  │
-│  (arcade-mcp-server, 6 tools, Google OAuth)          │
+│  (arcade-mcp-server, 7 tools)                        │
 ├─────────────────────────────────────────────────────┤
 │                                                      │
 │  Layer 1: Restaurant Discovery (REAL DATA)           │
 │  ├── search_nearby_restaurants (Google Places API)   │
 │  └── get_restaurant_details   (Google Places API)    │
-│  Auth: Arcade Google OAuth (per-user identity)       │
+│  Auth: requires_secrets (GOOGLE_PLACES_API_KEY)      │
 │                                                      │
 │  Layer 2: Menu & Pricing (SYNTHETIC, CALIBRATED)     │
 │  ├── get_restaurant_menu      (seeded RNG menus)     │
@@ -31,12 +31,23 @@ Sushi Scout searches for sushi restaurants near a location, generates price-cali
 │  ├── place_order              (mock confirmation)    │
 │  └── check_order_status       (mock timeline)        │
 │                                                      │
+│  OAuth Demo:                                         │
+│  └── get_user_profile         (Google OAuth)         │
+│  Auth: Arcade Google OAuth (userinfo.email scope)    │
+│                                                      │
 └─────────────────────────────────────────────────────┘
 ```
 
 ### Why synthetic menus?
 
 We evaluated 10+ APIs (Google Places, Yelp, Foursquare, OpenMenu, DoorDash, UberEats, Grubhub, etc.). No free public API provides structured menu items with prices for arbitrary restaurants. Our synthetic menus are calibrated to each restaurant's real `priceRange` from Google Places, so an inexpensive restaurant generates $5-8 tuna rolls while an expensive one generates $14-20+.
+
+### Auth approach
+
+Google Maps APIs authenticate with **API keys**, not OAuth tokens. The `cloud-platform` scope needed for Google APIs is not supported by Arcade's default Google OAuth provider. So:
+
+- **Search tools** use Arcade's `requires_secrets` pattern - the API key is injected via `context.get_secret("GOOGLE_PLACES_API_KEY")` from `.env` or environment variables.
+- **`get_user_profile`** demonstrates Arcade's Google OAuth flow using the supported `userinfo.email` scope, returning the authenticated user's email and profile info.
 
 ## Quick Start
 
@@ -74,11 +85,12 @@ uv run python -m sushi_scout --demo --order
 
 ### 3. Run the MCP server (full experience)
 
-The primary way to use Sushi Scout is through the MCP server with Arcade OAuth:
-
 ```bash
+# Set up your API key
+cp .env.example .env
+# Edit .env with your GOOGLE_PLACES_API_KEY
+
 # Start the MCP server (HTTP transport for Cursor/VS Code)
-cd sushi_scout
 uv run arcade mcp http --package sushi_scout --debug
 
 # Or stdio transport for Claude Desktop
@@ -89,12 +101,19 @@ Then connect from your MCP client (Claude Desktop, Cursor, etc.) and ask:
 
 > "Find me the cheapest tuna roll within 2 miles of downtown San Francisco"
 
-The server handles Google OAuth automatically - no API keys needed for end users.
+### 4. Test the OAuth flow
 
-### 4. Run tests
+The `get_user_profile` tool demonstrates Arcade's Google OAuth. To test interactively:
 
 ```bash
-cd sushi_scout
+uv run python test_oauth_flow.py
+```
+
+This starts a STDIO MCP session, triggers the OAuth flow, opens your browser for Google login, and returns your profile info.
+
+### 5. Run tests
+
+```bash
 uv run pytest -v
 ```
 
@@ -111,8 +130,9 @@ tests/test_evals.py     -  9 tests (price tiers, ranking, edge cases, performanc
 
 | Tool | Description | Auth |
 |------|-------------|------|
-| `search_nearby_restaurants` | Find sushi restaurants by location + radius | Google OAuth |
-| `get_restaurant_details` | Get hours, reviews, delivery info for a restaurant | Google OAuth |
+| `search_nearby_restaurants` | Find sushi restaurants by lat/lng + radius | API key (`requires_secrets`) |
+| `get_restaurant_details` | Get hours, reviews, delivery info for a restaurant | API key (`requires_secrets`) |
+| `get_user_profile` | Get authenticated user's Google profile | Google OAuth (`requires_auth`) |
 | `get_restaurant_menu` | Generate price-calibrated menu for a restaurant | None |
 | `find_cheapest_tuna_roll` | Rank all tuna rolls across multiple restaurants | None |
 | `place_order` | Simulate placing a delivery order | None |
@@ -123,19 +143,20 @@ tests/test_evals.py     -  9 tests (price tiers, ranking, edge cases, performanc
 ```
 sushi_scout/
 ├── src/sushi_scout/
-│   ├── server.py          # MCPApp entry point, registers all tools
+│   ├── server.py          # MCPApp entry point, imports tool modules
 │   ├── agent.py           # CLI demo agent
 │   ├── __main__.py        # python -m sushi_scout support
 │   └── tools/
-│       ├── search.py      # Google Places API integration (OAuth)
-│       ├── menu.py        # Synthetic menu generation (price-calibrated)
-│       └── ordering.py    # Mock ordering flow
+│       ├── search.py      # Google Places API + OAuth demo (3 tools)
+│       ├── menu.py        # Synthetic menu generation (2 tools)
+│       └── ordering.py    # Mock ordering flow (2 tools)
 ├── tests/
 │   ├── conftest.py        # Shared fixtures (real SF API response data)
 │   ├── test_search.py     # Search tool formatting tests
 │   ├── test_menu.py       # Menu generation & calibration tests
 │   ├── test_ordering.py   # Order logic tests
 │   └── test_evals.py      # End-to-end evaluation scenarios
+├── test_oauth_flow.py     # Interactive OAuth test via STDIO MCP
 ├── pyproject.toml         # Dependencies and build config
 └── .env.example           # Environment variable template
 ```
@@ -144,8 +165,9 @@ sushi_scout/
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Primary API | Google Places (New) | Rich restaurant data, real-time, via Arcade OAuth |
-| Auth | Arcade Google OAuth | Demonstrates Arcade's core value prop, no shared secrets |
+| Primary API | Google Places (New) | Rich restaurant data, real-time, self-serve |
+| Search auth | `requires_secrets` (API key) | Google Maps uses API keys; `cloud-platform` OAuth scope unsupported by Arcade |
+| OAuth demo | `get_user_profile` | Demonstrates Arcade's OAuth with supported `userinfo.email` scope |
 | Menu data | Synthetic, calibrated | No free public API has menu items; prices match real tiers |
 | Ordering | Mock/simulated | Delivery platforms have no public ordering APIs |
 | Agent framework | Custom CLI | Lightweight, focused on demonstrating MCP tool usage |
@@ -162,19 +184,25 @@ sushi_scout/
 
 This project was built as an Arcade.dev engineering interview submission. See [DEVELOPMENT_NOTES.md](DEVELOPMENT_NOTES.md) for a detailed log of the development process, including all prompts, API research, architecture decisions, and implementation details.
 
-### API key fallback (testing only)
-
-For local testing without OAuth, set `GOOGLE_PLACES_API_KEY` in a `.env` file:
+### Environment setup
 
 ```bash
 cp sushi_scout/.env.example sushi_scout/.env
-# Edit .env with your Google Places API key
+# Edit .env with your keys:
+#   GOOGLE_PLACES_API_KEY=your_google_key
+#   ARCADE_API_KEY=your_arcade_key
+```
+
+### Live mode (requires API key)
+
+```bash
+cd sushi_scout
 uv run python -m sushi_scout --lat 37.7749 --lng -122.4194 --radius 2.0
 ```
 
 ## Built With
 
-- [Arcade MCP Server](https://docs.arcade.dev) - MCP server framework with OAuth
+- [Arcade MCP Server](https://docs.arcade.dev) - MCP server framework with OAuth and secrets
 - [Google Places API (New)](https://developers.google.com/maps/documentation/places/web-service) - Restaurant discovery
 - [httpx](https://www.python-httpx.org/) - Async HTTP client
 - [uv](https://docs.astral.sh/uv/) - Python package management
