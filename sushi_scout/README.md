@@ -4,6 +4,8 @@
 
 Sushi Scout searches for real sushi restaurants near a location (via Google Places API), generates price-calibrated menus, ranks all tuna rolls by price, and optionally places a simulated order. All 7 tools are exposed via MCP for use with Claude Desktop, Cursor, or any MCP client.
 
+> **What's real vs simulated?** Restaurant discovery uses **live Google Places API data** (names, ratings, price tiers, delivery flags). Menu items and prices are **synthetic but calibrated** to each restaurant's real price tier - no free public API provides structured menu data (we evaluated 10+). Ordering is **fully simulated** - delivery platforms have no public APIs.
+
 ---
 
 ## Quick Start
@@ -68,12 +70,9 @@ Server starts at `http://127.0.0.1:8000`. Connect your MCP client to that URL.
 
 ### 4. Run with real data from CLI
 
-```bash
-# Set up API key
-cp src/sushi_scout/.env.example .env
-# Edit .env: GOOGLE_PLACES_API_KEY=your_key
+Set up your API key first (see [Auth Setup](#option-a-api-key-default-simplest)), then:
 
-# Search real restaurants near SF
+```bash
 uv run python -m sushi_scout --lat 37.7749 --lng -122.4194 --radius 2.0
 ```
 
@@ -257,6 +256,16 @@ GCP_PROJECT_ID=your-gcp-project-id
 - **Price calibration tests**: Verify INEXPENSIVE < MODERATE < EXPENSIVE < VERY_EXPENSIVE
 - **Eval scenarios**: Urban high-density, suburban limited, edge cases (single restaurant, no delivery, missing metadata, 50-restaurant performance)
 - **Determinism tests**: Same input always produces same output
+
+---
+
+## Known Limitations
+
+- **Menu data is synthetic** - no free public API provides structured menu items with prices for arbitrary restaurants. We researched Google Places, Yelp Fusion, Foursquare, OpenMenu, DoorDash, UberEats, and Grubhub. Menus are calibrated to real price tiers but are not real menus.
+- **Ordering is simulated** - delivery platforms (DoorDash, UberEats, Grubhub) only offer merchant-facing APIs, not consumer ordering APIs. Order placement returns mock confirmations.
+- **OAuth for Places requires custom provider setup** - Arcade's built-in Google provider doesn't support the `cloud-platform` scope needed for Google Maps APIs. The OAuth path requires registering a custom OAuth2 provider in Arcade (see [Auth Setup](#auth-setup)). The API key path works out of the box.
+- **Max 10 restaurants per search** - Google Places API limit per request.
+- **`get_user_profile` is a demo tool** - exists to demonstrate Arcade's built-in Google OAuth with a supported scope (`userinfo.email`), not core sushi-finding functionality.
 
 ---
 
