@@ -8,7 +8,7 @@ This agent demonstrates the full sushi-scout workflow using our tools directly:
 4. Optionally place a simulated order
 
 For the full MCP experience with Google OAuth:
-    arcade mcp http --package sushi_scout --debug
+    arcade mcp -p sushi_scout http --debug
 
 Then connect via Claude Desktop, Cursor, or any MCP client.
 
@@ -234,7 +234,7 @@ async def search_live(latitude: float, longitude: float, radius_miles: float):
         print("[ERROR] For live mode, set GOOGLE_PLACES_API_KEY in environment or .env")
         print()
         print("For the full OAuth experience, run the MCP server instead:")
-        print("  cd sushi_scout && uv run arcade mcp http --package sushi_scout --debug")
+        print("  cd sushi_scout && uv run arcade mcp -p sushi_scout http --debug")
         print()
         print("Or try demo mode: uv run python -m sushi_scout --demo")
         return None
@@ -308,7 +308,7 @@ def main():
         description="Sushi Scout - Find the cheapest tuna roll nearby",
         epilog=(
             "For the full OAuth MCP experience:\n"
-            "  cd sushi_scout && uv run arcade mcp http --package sushi_scout --debug\n"
+            "  cd sushi_scout && uv run arcade mcp -p sushi_scout http --debug\n"
             "Then connect via Claude Desktop, Cursor, or any MCP client."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -333,7 +333,7 @@ def main():
         import asyncio
 
         print(f"Searching near ({args.lat}, {args.lng}), radius {args.radius} miles...")
-        print("(Using API key fallback. For OAuth, run via: arcade mcp http)\n")
+        print("(Using API key fallback. For OAuth, run via: arcade mcp -p sushi_scout http)\n")
         restaurants = asyncio.run(search_live(args.lat, args.lng, args.radius))
         if not restaurants:
             return

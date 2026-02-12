@@ -1,20 +1,82 @@
 """Restaurant search tools using Google Places API.
 
-Uses GOOGLE_PLACES_API_KEY (via requires_secrets) for Places API calls.
-Google Maps APIs authenticate with API keys, not OAuth tokens, and the
-cloud-platform scope isn't in Arcade's default Google provider anyway.
+Supports two auth modes for Google Places API calls:
 
-Arcade Google OAuth is demonstrated separately via get_user_profile,
-which uses the supported userinfo.email scope.
+1. API Key mode (default): Uses GOOGLE_PLACES_API_KEY via Arcade's
+   requires_secrets pattern. Simple to set up - just add the key to .env.
+
+2. OAuth mode: Uses a custom Arcade OAuth2 provider with Google's
+   cloud-platform scope. No API key needed - users authenticate via
+   browser. Requires registering a custom OAuth2 provider in Arcade.
+   Set SUSHI_SCOUT_AUTH_MODE=oauth to enable.
+
+See README.md "Auth Setup" section for detailed instructions on both modes.
+
+Arcade Google OAuth is also demonstrated via get_user_profile, which uses
+the supported userinfo.email scope from Arcade's built-in Google provider.
 """
 
+import os
 from typing import Annotated, Any
 
 import httpx
 from arcade_mcp_server import Context, tool
-from arcade_mcp_server.auth import Google
+from arcade_mcp_server.auth import Google, OAuth2
 
 PLACES_BASE_URL = "https://places.googleapis.com/v1/places"
+
+# ---------------------------------------------------------------------------
+# Auth configuration
+# ---------------------------------------------------------------------------
+# Set SUSHI_SCOUT_AUTH_MODE=oauth to switch from API key to OAuth mode.
+# OAuth mode requires a custom Arcade OAuth2 provider - see README.md.
+AUTH_MODE = os.environ.get("SUSHI_SCOUT_AUTH_MODE", "api_key")
+
+# Custom OAuth2 provider settings (only used when AUTH_MODE="oauth")
+# These must match the provider registered in Arcade's dashboard or engine.yaml.
+OAUTH_PROVIDER_ID = "google-places"
+OAUTH_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+
+# Google Cloud project ID for billing when using OAuth mode.
+# Required because OAuth replaces the API key, so Google needs to know
+# which project to bill for Places API usage.
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
+
+
+def _places_auth_kwargs() -> dict:
+    """Build the auth kwargs for the @tool decorator based on AUTH_MODE.
+
+    Returns either requires_secrets (API key) or requires_auth (OAuth)
+    config, which gets unpacked into the @tool() decorator.
+    """
+    if AUTH_MODE == "oauth":
+        return {"requires_auth": OAuth2(id=OAUTH_PROVIDER_ID, scopes=OAUTH_SCOPES)}
+    return {"requires_secrets": ["GOOGLE_PLACES_API_KEY"]}
+
+
+def _build_places_headers(context: Context, field_mask: list[str]) -> dict[str, str]:
+    """Build Google Places API request headers for the active auth mode.
+
+    In API key mode: uses X-Goog-Api-Key header.
+    In OAuth mode: uses Authorization: Bearer header + X-Goog-User-Project.
+    """
+    if AUTH_MODE == "oauth":
+        token = context.get_auth_token_or_empty()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Goog-FieldMask": ",".join(field_mask),
+        }
+        if GCP_PROJECT_ID:
+            headers["X-Goog-User-Project"] = GCP_PROJECT_ID
+        return headers
+    else:
+        api_key = context.get_secret("GOOGLE_PLACES_API_KEY")
+        return {
+            "X-Goog-Api-Key": api_key,
+            "Content-Type": "application/json",
+            "X-Goog-FieldMask": ",".join(field_mask),
+        }
 
 # Fields to request from Google Places API
 SEARCH_FIELDS = [
@@ -117,7 +179,7 @@ def _format_restaurant_details(place: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@tool(requires_secrets=["GOOGLE_PLACES_API_KEY"])
+@tool(**_places_auth_kwargs())
 async def search_nearby_restaurants(
     context: Context,
     latitude: Annotated[float, "Latitude of the search center"],
@@ -129,12 +191,7 @@ async def search_nearby_restaurants(
     Returns restaurants with ratings, price ranges, and location data.
     Use this as the first step to find cheap tuna rolls nearby.
     """
-    api_key = context.get_secret("GOOGLE_PLACES_API_KEY")
-    headers = {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": api_key,
-        "X-Goog-FieldMask": ",".join(SEARCH_FIELDS),
-    }
+    headers = _build_places_headers(context, SEARCH_FIELDS)
 
     payload = {
         "includedTypes": ["japanese_restaurant", "sushi_restaurant"],
@@ -167,7 +224,7 @@ async def search_nearby_restaurants(
     }
 
 
-@tool(requires_secrets=["GOOGLE_PLACES_API_KEY"])
+@tool(**_places_auth_kwargs())
 async def get_restaurant_details(
     context: Context,
     place_id: Annotated[str, "Google Places ID of the restaurant"],
@@ -177,11 +234,7 @@ async def get_restaurant_details(
     Returns delivery availability, hours, reviews, and more.
     Use this after search_nearby_restaurants to get details for a specific place.
     """
-    api_key = context.get_secret("GOOGLE_PLACES_API_KEY")
-    headers = {
-        "X-Goog-Api-Key": api_key,
-        "X-Goog-FieldMask": ",".join(DETAIL_FIELDS),
-    }
+    headers = _build_places_headers(context, DETAIL_FIELDS)
 
     async with httpx.AsyncClient() as client:
         response = await client.get(

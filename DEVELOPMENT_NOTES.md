@@ -312,6 +312,86 @@ sure the claude.md file and the dev notes are really good and in sync
 - Identified major discrepancies between docs and reality
 - Updated all 3 documents to match actual implementation
 
+### Session 3: OAuth Research & Dual Auth Implementation
+**Date:** 2026-02-11 (continued)
+
+#### User Prompt 13: OAuth for Places API
+```
+i do want to think about how to allow the users of this repo to use oauth
+instead of having to set up an api key
+```
+
+**Research Conducted:**
+
+Comprehensive investigation into whether Google Places API can use OAuth instead
+of API keys, and how Arcade supports custom OAuth2 providers.
+
+**Key Findings:**
+
+1. **Google Places API (New) supports OAuth Bearer tokens** - not just API keys.
+   The required scope is `https://www.googleapis.com/auth/cloud-platform`.
+   When using OAuth, `X-Goog-Api-Key` is replaced with `Authorization: Bearer {token}`
+   and `X-Goog-User-Project: {project_id}` is required for billing.
+
+2. **Arcade's built-in Google provider does NOT support `cloud-platform`** -
+   only 15 scopes: calendar, contacts, drive.file, gmail, userinfo, openid.
+
+3. **Arcade fully supports custom OAuth2 providers** - registered via the
+   Arcade Dashboard or `engine.yaml`. The `OAuth2` class uses the `id` parameter:
+   ```python
+   from arcade_mcp_server.auth import OAuth2
+   OAuth2(id="google-places", scopes=["https://www.googleapis.com/auth/cloud-platform"])
+   ```
+
+4. **`cloud-platform` is a sensitive scope** - Google requires app verification
+   for production. "Testing" mode allows up to 100 explicitly added test users.
+
+**Implementation: Dual Auth Mode**
+
+Rather than choosing one auth path, we implemented both with runtime switching:
+
+- `SUSHI_SCOUT_AUTH_MODE` env var controls which mode is active (`api_key` or `oauth`)
+- `_places_auth_kwargs()` builds the correct `@tool()` decorator args
+- `_build_places_headers()` builds the correct HTTP headers for each mode
+- Default is `api_key` (works out of the box), `oauth` requires custom provider setup
+
+**Files Changed:**
+- `search.py` - Added `OAuth2` import, auth configuration block, helper functions,
+  refactored tools to use `@tool(**_places_auth_kwargs())`
+- `.env.example` - Added `SUSHI_SCOUT_AUTH_MODE` and `GCP_PROJECT_ID` vars
+- `README.md` - Added comprehensive "Auth Setup" section with both Option A (API key)
+  and Option B (OAuth) with full step-by-step instructions including `engine.yaml` example
+- `DEVELOPMENT_NOTES.md` - This session log
+- `claude.md` - Updated auth strategy section
+
+**Commits Made:**
+5. `(pending)` - Add dual auth, Claude Desktop support, final polish
+
+### Session 4: Claude Desktop Testing & Final Polish
+**Date:** 2026-02-11 (continued)
+
+#### User Prompt 14: Claude Desktop Setup
+```
+ok let's try to run this in claude desktop
+```
+
+**Actions Taken:**
+- Created Claude Desktop MCP config (`claude_desktop_config.json`)
+- Discovered several Windows/Claude Desktop gotchas (see Gotchas section)
+- Successfully connected Sushi Scout MCP server to Claude Desktop with all 7 tools visible
+
+#### User Prompt 15: Final Documentation Polish
+```
+let's work on cleaning up this project so that the developer logs and instructions
+are really clean and clear, making sure that the readme really makes it super easy to quickstart
+```
+
+**Actions Taken:**
+- Rewrote README.md: quickstart-first structure, Claude Desktop config included, fixed all command syntax
+- Fixed `arcade mcp` command syntax across all files (args were in wrong order everywhere)
+- Updated DEVELOPMENT_NOTES.md with Session 4 log
+- Cleaned up claude.md
+
 ---
 
 ## Current Status
@@ -320,26 +400,21 @@ sure the claude.md file and the dev notes are really good and in sync
 - [x] Project planning and architecture design
 - [x] Comprehensive API research (10+ APIs evaluated)
 - [x] Google Places API testing (confirmed: search works, no menu data)
-- [x] Menu data API exhaustive search (no free option exists)
 - [x] Architecture finalized (3-layer: real discovery + synthetic menus + mock ordering)
 - [x] MCP server scaffolded with `arcade new sushi_scout`
 - [x] 7 tools implemented (search, menu, ordering, OAuth demo)
-- [x] Tool registration refactored from `@app.tool` closures to module-level `@tool`
-- [x] Auth refactored: API key for Places, OAuth demo with `userinfo.email`
-- [x] 44 tests written and all passing
-- [x] Eval scenarios covering price calibration, ranking, and edge cases
+- [x] Tool registration refactored to module-level `@tool`
+- [x] Dual auth mode: API key (default) + OAuth via custom Arcade provider
+- [x] 46 tests written and all passing
 - [x] Agent application built with demo mode
-- [x] End-to-end MCP protocol testing (HTTP transport) - all tools work
-- [x] STDIO transport debugging (framing, encoding) - working
-- [x] README.md written with setup and usage instructions
-- [x] `test_oauth_flow.py` created for interactive OAuth testing
-- [x] Documentation synced (claude.md, DEVELOPMENT_NOTES.md, README.md)
-- [x] All commits pushed to remote
+- [x] End-to-end testing: HTTP transport, STDIO transport, Claude Desktop
+- [x] Live testing with real Google Places API data
+- [x] Claude Desktop integration working (all 7 tools)
+- [x] README.md with quickstart, Claude Desktop config, and auth setup
+- [x] Documentation synced and polished
 
 ### Remaining Work
-- [ ] Run full interactive OAuth test (`test_oauth_flow.py`) to confirm `userinfo.email` flow end-to-end
-- [ ] Demo format: video walkthrough TBD
-- [ ] Final polish and review
+- [ ] Final commit and push
 
 ---
 
@@ -349,7 +424,7 @@ sure the claude.md file and the dev notes are really good and in sync
 |----------|--------|-----------|
 | Project Name | sushi-scout | User preference, clear and descriptive |
 | Primary API | Google Places API (New) | Confirmed: rich restaurant data (10 results in SF test) |
-| Search Auth | `requires_secrets=["GOOGLE_PLACES_API_KEY"]` | Google Maps uses API keys; `cloud-platform` OAuth scope unsupported by Arcade |
+| Search Auth | Dual: API key (default) or OAuth (custom provider) | API key is simplest; OAuth via custom Arcade OAuth2 provider eliminates key setup for users |
 | OAuth Demo | `get_user_profile` with `userinfo.email` scope | Demonstrates Arcade's OAuth flow with a scope that works |
 | Menu Data | Synthetic (calibrated to real priceRange) | No public API exists for menu items; calibration makes it realistic |
 | Ordering | Mock/simulated | Delivery platforms have no public ordering APIs |
@@ -365,13 +440,16 @@ sure the claude.md file and the dev notes are really good and in sync
 - [x] Google Places DOES have: priceRange, delivery flag, ratings, reviews, hours
 - [x] Arcade DOES support Google OAuth providers (but only specific scopes)
 - [x] `cloud-platform` scope is NOT supported by Arcade's default Google provider
-- [x] Google Maps APIs use API keys, not OAuth tokens
+- [x] Google Places API DOES support OAuth Bearer tokens (requires `cloud-platform` scope + `X-Goog-User-Project` header)
+- [x] Arcade DOES support custom OAuth2 providers with any scope (`OAuth2(id="...", scopes=[...])`)
+- [x] Dual auth implemented: API key (default) + custom OAuth2 provider (opt-in via env var)
 - [x] Only Google Places needed (Yelp dropped - redundant)
 - [x] Agent framework: Custom CLI (lightweight, no framework overhead)
 - [x] Tool registration: Module-level `@tool` (not `@app.tool` inside closures)
 - [x] `arcade mcp stdio` uses raw JSON + newline framing (not Content-Length LSP framing)
 - [x] OAuth tools can only run via STDIO transport (not HTTP)
-- [ ] Demo format: CLI demo working, video walkthrough TBD
+- [x] Claude Desktop config path: Store apps use `%LOCALAPPDATA%\Packages\...`
+- [x] `arcade mcp` argument order: `-p` before transport arg
 
 ---
 
@@ -388,6 +466,20 @@ sure the claude.md file and the dev notes are really good and in sync
 5. **HTTP transport blocks OAuth**: Tools with `requires_auth` can only be called via STDIO transport, not HTTP. Security restriction.
 
 6. **Windows cp1252 encoding**: Arcade's output contains Unicode symbols that Windows console can't render. Always set `PYTHONIOENCODING=utf-8` for subprocess calls.
+
+7. **Custom OAuth2 providers**: Arcade's `OAuth2` class uses `id` parameter (not `provider_id`): `OAuth2(id="my-provider", scopes=[...])`. The `provider_id` attribute is for built-in providers only.
+
+8. **Google Places API OAuth billing**: When using OAuth instead of API key, Google requires `X-Goog-User-Project` header for billing. The token replaces the API key, but Google still needs to know which project to charge.
+
+9. **`cloud-platform` is sensitive**: Google classifies it as a sensitive scope requiring app verification for production. "Testing" mode (up to 100 users) works for demos.
+
+10. **`arcade mcp` argument order**: The `-p package_name` flag must come BEFORE the transport argument: `arcade mcp -p sushi_scout stdio` (NOT `arcade mcp stdio -p sushi_scout`). The transport (`stdio`/`http`) is a positional argument.
+
+11. **Claude Desktop needs absolute path to `uv`**: Claude Desktop spawns MCP servers as child processes without the shell PATH. Use the full path to `uv.exe` in the config.
+
+12. **Windows Store Claude Desktop config path**: Store-installed Claude Desktop uses a virtualized AppData path: `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\` instead of `%APPDATA%\Claude\`.
+
+13. **Use `--directory` flag for uv in MCP configs**: More reliable than the `cwd` config field. Pass `--directory /path/to/project` in the `args` array.
 
 ---
 
@@ -423,6 +515,9 @@ sure the claude.md file and the dev notes are really good and in sync
 
 **Git History:**
 ```
+(pending) Add dual auth, Claude Desktop support, documentation polish
+cb137c4 Fix delivery consistency bug and None formatting in agent
+c1e5cb5 Sync all docs with actual implementation
 3b62460 Fix auth: use API key for Places, add OAuth demo with supported scope
 4d03d02 Refactor tools to module-level @tool decorators for arcade CLI discovery
 aa67498 Initial commit: Sushi Scout MCP server and agent
