@@ -1,7 +1,7 @@
 # Meow Art: Project Plan
 
 **Concept:** An LLM-powered agent that fetches cat facts, retrieves the user's Slack
-avatar, generates a stylized cat-themed image using Stability AI's image-to-image API
+avatar, generates a stylized cat-themed image using OpenAI's image-to-image API
 (with the avatar as the input image), and sends the result back to Slack.
 
 ---
@@ -139,7 +139,7 @@ You are Meow Art, a fun agent that creates cat-fact-inspired art and sends it vi
 TOOLS:
 - get_cat_fact(count)         — Fetch 1-5 random cat facts (no auth)
 - get_user_avatar()           — Get user's Slack avatar URL (Slack OAuth)
-- generate_cat_image(fact, avatar_url, style) — Create stylized art from avatar + fact (Stability API)
+- generate_cat_image(fact, avatar_url, style) — Create stylized art from avatar + fact (OpenAI gpt-image-1)
 - send_cat_fact(channel, count) — Send text-only fact(s) to a Slack channel (Slack OAuth)
 - send_cat_image(image_base64, cat_fact, channel) — Upload image + caption to Slack (Slack OAuth)
 - meow_me()                   — One-shot: fact + avatar + image + DM self (Slack OAuth)
@@ -190,7 +190,7 @@ Input:  (none - identifies user from OAuth token)
 Output: {
     "success": true,
     "fact": "Cats can rotate their ears 180 degrees",
-    "image_generated": true,        # false if Stability API unavailable
+    "image_generated": true,        # false if OpenAI image API unavailable
     "image_sent": true,             # false if image generation was skipped
     "recipient": "U012ABC",
     "channel": "D0123456789"
@@ -203,7 +203,7 @@ Output: {
 3. Fetch cat fact from MeowFacts
 4. users.info -> get own avatar URL
 5. generate_cat_image (internally) -> stylized image
-   - If STABILITY_API_KEY missing: graceful fallback, send text-only fact
+   - If OPENAI_API_KEY missing: graceful fallback, send text-only fact
 6. Upload image + fact caption to DM channel
 7. Return result
 
@@ -237,7 +237,7 @@ Output: {
 ### Tool: `generate_cat_image` (NEW)
 
 **Module:** `tools/image.py`
-**Auth:** Stability AI API key via `requires_secrets`
+**Auth:** OpenAI API key (same key as the agent LLM — no extra credentials)
 
 ```
 Input: {
@@ -253,39 +253,39 @@ Output: {
 }
 ```
 
-**Stability AI endpoint:**
-```
-POST https://api.stability.ai/v2beta/stable-image/generate/sd3
-Content-Type: multipart/form-data
-Authorization: Bearer {STABILITY_API_KEY}
+**OpenAI Images Edit API:**
+```python
+from openai import OpenAI
+client = OpenAI()  # uses OPENAI_API_KEY env var
 
-Form fields:
-  - image: <avatar image bytes>       (init image for img2img)
-  - prompt: <cat-themed prompt>       (incorporating the fact)
-  - strength: 0.65                    (how much to transform)
-  - output_format: png
-  - mode: image-to-image
+# Download avatar bytes first, then:
+response = client.images.edit(
+    model="gpt-image-1",
+    image=avatar_bytes,          # PNG/WebP/JPG, <50MB
+    prompt="...",                 # cat-themed prompt incorporating the fact
+    size="1024x1024",
+)
+image_base64 = response.data[0].b64_json
 ```
 
 **Prompt composition example:**
 ```
 fact: "Cats can rotate their ears 180 degrees"
 style: "cartoon"
--> "A whimsical cartoon illustration of a cat rotating its ears 180 degrees,
-   vibrant colors, fun and playful style, the person in the photo transformed
-   into a cartoon character watching the cat in amazement"
+-> "Transform this photo into a whimsical cartoon illustration featuring a cat
+   rotating its ears 180 degrees. The person in the photo should be reimagined
+   as a cartoon character watching the cat in amazement. Vibrant colors, fun
+   and playful style."
 ```
 
-**Fallback when no STABILITY_API_KEY:**
+**Fallback when no OPENAI_API_KEY:**
 - Return a bundled placeholder image (a small pre-made PNG)
 - Set `"fallback": true` in the response so the agent can inform the user
-- The tool still "works" -- it just returns a placeholder instead of a real generation
+- The tool still "works" — it just returns a placeholder instead of a real generation
 - This lets the full pipeline complete without errors
 
-**Avatar resizing:** Slack avatars are 512x512. Stability AI needs dimensions
-as multiples of 64. 512 is already a multiple of 64, so no resizing should be
-needed. If we hit issues, we'll crop/pad using pure Python (struct/bytes
-manipulation) before adding a Pillow dependency.
+**Avatar sizing:** Slack avatars are 512x512 PNG. OpenAI accepts PNG/WebP/JPG
+up to 50MB, so no resizing needed. The output will be 1024x1024.
 
 ### Tool: `send_cat_image` (NEW)
 
@@ -439,8 +439,7 @@ evaluator can see what the output looks like.
 
 ```bash
 # .env (gitignored)
-OPENAI_API_KEY=sk-...                  # For agent LLM (OpenAI, used by agents-arcade)
-STABILITY_API_KEY=sk-...               # For image generation (graceful fallback if missing)
+OPENAI_API_KEY=sk-...                  # For agent LLM AND image generation (single key)
 ARCADE_API_KEY=arc-...                 # For Arcade platform (Slack OAuth routing)
 ```
 
@@ -466,9 +465,9 @@ ARCADE_API_KEY=arc-...                 # For Arcade platform (Slack OAuth routin
   - Tests: mock Slack responses, test extraction, missing profile, error handling
 
 - [ ] **Step 2:** Create `tools/image.py` with `generate_cat_image` tool
-  - Download avatar, compose prompt, call Stability AI img2img
+  - Download avatar, compose prompt, call OpenAI img2img
   - Fallback: return bundled placeholder image when no API key
-  - Tests: mock Stability API, prompt composition, fallback behavior, style variants
+  - Tests: mock OpenAI image API, prompt composition, fallback behavior, style variants
 
 - [ ] **Step 3:** Add `send_cat_image` to `tools/slack.py`
   - files.getUploadURLExternal -> upload -> files.completeUploadExternal
@@ -521,7 +520,7 @@ ARCADE_API_KEY=arc-...                 # For Arcade platform (Slack OAuth routin
 | test_facts.py | 11 | **Existing**, unchanged |
 | test_slack.py | ~23 | **Extended**: existing 15 + ~8 new (send_cat_image upload flow, meow_me upgrade, fallback) |
 | test_avatar.py | ~8 | **New**: auth.test mock, users.info mock, avatar extraction, missing fields, errors |
-| test_image.py | ~10 | **New**: prompt composition, Stability API mock, fallback placeholder, avatar download, style variants, base64 output |
+| test_image.py | ~10 | **New**: prompt composition, OpenAI image API mock, fallback placeholder, avatar download, style variants, base64 output |
 | test_agent.py | ~6 | **New**: tool definitions, demo mode e2e, system prompt validation |
 
 ### Eval Tests (agent routing)
@@ -664,7 +663,7 @@ meow_me/
     test_agent.py          (NEW)
     test_evals.py          (extend with routing evals)
   pyproject.toml           (add openai, agents-arcade deps)
-  .env.example             (add STABILITY_API_KEY, OPENAI_API_KEY)
+  .env.example             (add OPENAI_API_KEY, OPENAI_API_KEY)
   README.md                (update)
 ```
 
@@ -676,6 +675,7 @@ meow_me/
 dependencies = [
     "arcade-mcp-server>=1.11.1,<2.0.0",
     "httpx>=0.28.0,<1.0.0",
+    "openai>=1.30.0,<2.0.0",            # For image generation (gpt-image-1)
 ]
 
 [project.optional-dependencies]
@@ -693,9 +693,10 @@ dev = [
 ]
 ```
 
-MCP server tools only need `httpx`. Agent dependencies are optional (`pip install meow_me[agent]`).
-No Pillow needed (512x512 is already a valid Stability AI dimension).
-No Stability SDK needed (direct REST via httpx).
+MCP server tools only need `httpx` (and `openai` for image generation).
+Agent dependencies are optional (`pip install meow_me[agent]`).
+No Pillow needed — OpenAI accepts PNG up to 50MB, no resizing required.
+Single OpenAI API key serves both the agent LLM and image generation.
 
 ---
 
@@ -705,10 +706,9 @@ No Stability SDK needed (direct REST via httpx).
 |----------|--------|-----------|
 | LLM provider | OpenAI (via agents-arcade) | Arcade's recommended framework |
 | Agent framework | OpenAI Agents SDK + agents-arcade | Arcade's primary example pattern |
-| Image gen API | Stability AI (img2img) | Supports avatar as input image |
-| Missing Stability key | Graceful fallback in tool (placeholder image) | Agent pipeline still works end-to-end |
-| Missing OpenAI key | Fully scripted demo mode | No LLM needed, shows all scenarios |
-| Image resizing | Skip (512 is valid) | Try without Pillow first |
+| Image gen API | OpenAI gpt-image-1 (images.edit) | Same API key as agent LLM, supports image input |
+| Missing OpenAI key | Fully scripted demo mode + placeholder images in tools | No LLM or image gen needed |
+| Image resizing | Not needed | OpenAI accepts PNG up to 50MB, outputs 1024x1024 |
 | Fact rotation | Agent presents fact, user approves/rotates | Adds meaningful interactivity |
 | meow_me behavior | One-shot full pipeline (fact+image+DM) | Only path that skips user prompts |
 | Everything else | Two-phase: fact selection, then "image or text?" | User always gets the choice |
@@ -718,9 +718,8 @@ No Stability SDK needed (direct REST via httpx).
 
 ## 12. Remaining Risks
 
-1. **Stability AI img2img on v2beta/sd3:** Exact multipart field names need
-   verification. Fallback: use v1 `image-to-image` endpoint if v2beta doesn't
-   support img2img mode.
+1. **OpenAI gpt-image-1 edit endpoint:** Well-documented and tested by the community.
+   Accepts PNG/WebP/JPG input, returns base64. Low risk.
 
 2. **agents-arcade toolkit loading:** Need to verify that `get_arcade_tools(client,
    toolkits=["meow_me"])` can discover locally-registered tools (not just
@@ -730,5 +729,5 @@ No Stability SDK needed (direct REST via httpx).
    `files.completeUploadExternal` is a 3-step process. Needs careful error handling
    if any step fails.
 
-4. **Cost:** Stability AI ~$0.03-0.065/image, OpenAI ~$0.01-0.05/agent turn.
-   Demo mode avoids all costs.
+4. **Cost:** OpenAI images.edit ~$0.02-0.08/image, agent LLM ~$0.01-0.05/turn.
+   Single API key for both. Demo mode avoids all costs.

@@ -10,6 +10,8 @@ app = MCPApp(name="meow_me", version="0.1.0", log_level="DEBUG")
 # Module-level imports register tools with the app via @tool decorator
 import meow_me.tools.facts  # noqa: E402, F401
 import meow_me.tools.slack  # noqa: E402, F401
+import meow_me.tools.avatar  # noqa: E402, F401
+import meow_me.tools.image  # noqa: E402, F401
 
 # Run with specific transport
 if __name__ == "__main__":

@@ -137,36 +137,48 @@ tests/test_evals.py     - 10 tests (price tiers, ranking, real API patterns, per
 
 ---
 
-# PROJECT: Meow Me
+# PROJECT: Meow Me (Meow Art)
 
 **Name:** `meow-me`
-**Goal:** MCP server that fetches random cat facts and Slack DMs them to you via Arcade's built-in Slack OAuth.
+**Goal:** MCP server + LLM-powered CLI agent that fetches cat facts, generates cat-themed art from your Slack avatar, and sends results to Slack.
 
 ---
 
 ## Architecture
 
 ```
-get_cat_fact   (no auth)        → MeowFacts API → random facts
-meow_me        (Slack OAuth)    → auth.test + conversations.open + MeowFacts + chat.postMessage → DM self
-send_cat_fact  (Slack OAuth)    → MeowFacts + chat.postMessage → send to channel
+Interactive Agent (OpenAI Agents SDK, gpt-4o-mini + 6 tools)
+  │ @function_tool wrappers
+  ▼
+MCP Server (arcade-mcp-server, 6 tools)
+  get_cat_fact        (no auth)        → MeowFacts API → random facts
+  get_user_avatar     (Slack OAuth)    → auth.test + users.info → avatar URL + display name
+  generate_cat_image  (no auth)        → download avatar + gpt-image-1 images.edit → base64 PNG
+  meow_me             (Slack OAuth)    → fact + avatar + image gen + file upload → DM self
+  send_cat_fact       (Slack OAuth)    → MeowFacts + chat.postMessage → send to channel
+  send_cat_image      (Slack OAuth)    → file upload API → upload image to channel
 ```
 
 ### Auth
 
 Slack tools use Arcade's **built-in Slack provider**: `from arcade_mcp_server.auth import Slack`
-- `Slack(scopes=["chat:write", "im:write"])` for self-DM (im:write needed for conversations.open)
-- `Slack(scopes=["chat:write"])` for channel send
+- `meow_me`: `Slack(scopes=["chat:write", "im:write", "files:write", "users:read"])`
+- `get_user_avatar`: `Slack(scopes=["users:read"])`
+- `send_cat_fact`: `Slack(scopes=["chat:write"])`
+- `send_cat_image`: `Slack(scopes=["chat:write", "files:write"])`
 
 ---
 
-## MCP Tools (3 total)
+## MCP Tools (6 total)
 
 | Tool | Module | Auth | Description |
 |------|--------|------|-------------|
 | `get_cat_fact` | facts.py | None | Fetch 1-5 random cat facts |
-| `meow_me` | slack.py | Slack OAuth | Fetch fact + DM yourself |
-| `send_cat_fact` | slack.py | Slack OAuth | Send 1-3 facts to a channel |
+| `get_user_avatar` | avatar.py | Slack OAuth (`users:read`) | Get Slack avatar URL and display name |
+| `generate_cat_image` | image.py | None (uses `OPENAI_API_KEY`) | Transform avatar into cat-themed art via gpt-image-1 |
+| `meow_me` | slack.py | Slack OAuth (full scopes) | One-shot: fact + avatar + image + DM self |
+| `send_cat_fact` | slack.py | Slack OAuth (`chat:write`) | Send 1-3 text cat facts to a channel |
+| `send_cat_image` | slack.py | Slack OAuth (`chat:write`, `files:write`) | Upload image + caption to a channel |
 
 ---
 
@@ -176,8 +188,11 @@ Slack tools use Arcade's **built-in Slack provider**: `from arcade_mcp_server.au
 # Run tests
 cd meow_me && uv run pytest -v
 
-# Demo mode (no Slack needed)
+# Demo mode (no API keys needed)
 uv run python -m meow_me --demo
+
+# Interactive agent (requires OPENAI_API_KEY in .env)
+uv run python -m meow_me
 
 # MCP server (STDIO for Claude Desktop)
 uv run arcade mcp -p meow_me stdio
@@ -188,10 +203,13 @@ uv run arcade mcp -p meow_me http --debug
 
 ---
 
-## Testing (34 tests, all passing)
+## Testing (83 tests, all passing)
 
 ```
-tests/test_facts.py  - 11 tests (parsing, count clamping, API URL, empty responses)
-tests/test_slack.py  - 15 tests (formatting, auth.test, conversations.open, message sending)
-tests/test_evals.py  -  8 tests (end-to-end workflows, edge cases, formatting)
+tests/test_facts.py   - 11 tests (parsing, count clamping, API URL, empty responses)
+tests/test_slack.py   - 22 tests (formatting, auth.test, conversations.open, message sending, file upload)
+tests/test_avatar.py  - 13 tests (auth.test, users.info, avatar extraction, fallbacks)
+tests/test_image.py   - 14 tests (prompt composition, OpenAI mock, fallback placeholder, styles)
+tests/test_agent.py   - 15 tests (system prompt, demo mode, tool wrappers, auth checks)
+tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
 ```
