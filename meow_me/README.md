@@ -2,7 +2,7 @@
 
 **Cat-fact-inspired art agent** - an MCP server + LLM-powered CLI agent built with [Arcade.dev](https://arcade.dev) and [OpenAI](https://openai.com).
 
-Meow Art fetches random cat facts, retrieves your Slack avatar, generates stylized cat-themed images using OpenAI's gpt-image-1, and sends the results to Slack. It exposes 6 MCP tools and includes an interactive agent powered by the OpenAI Agents SDK.
+Meow Art fetches random cat facts, retrieves your Slack avatar, generates stylized cat-themed images using OpenAI's gpt-image-1, and sends the results to Slack. It exposes 6 MCP tools, includes an interactive agent powered by the OpenAI Agents SDK (with 7 tool wrappers including local save + ASCII preview), and supports both direct Slack tokens and Arcade OAuth for authentication.
 
 ---
 
@@ -33,8 +33,15 @@ Walks through 4 scripted scenarios showing exactly what the agent does: one-shot
 ### 3. Run the interactive agent
 
 ```bash
-# Add your OpenAI API key to .env
-echo "OPENAI_API_KEY=sk-..." > .env
+# Create .env with your keys
+cat > .env <<EOF
+OPENAI_API_KEY=sk-...
+# Option A: Direct Slack token (supports all features including image upload)
+SLACK_BOT_TOKEN=xoxb-...
+# Option B: Arcade OAuth (text messaging + avatars, no image upload)
+ARCADE_API_KEY=arc-...
+ARCADE_USER_ID=your-email@example.com
+EOF
 
 # Start the agent
 uv run python -m meow_me
@@ -44,6 +51,8 @@ The agent uses `gpt-4o-mini` to reason about which tools to call based on your i
 - `"Meow me!"` - one-shot: fetches fact + avatar + generates image + DMs you
 - `"Give me 3 cat facts"` - browse facts, pick one, choose image or text, choose where to send
 - `"Make me cat art"` - fetches a fact, generates cat-themed art from your avatar
+
+The agent shows real-time progress indicators as tools execute and displays ASCII art previews of generated images directly in the terminal.
 
 ### 4. Connect as MCP server
 
@@ -85,14 +94,14 @@ Server starts at `http://127.0.0.1:8000`.
 uv run pytest -v
 ```
 
-83 tests, all passing:
+101 tests, all passing:
 
 ```
 tests/test_facts.py   - 11 tests (parsing, count clamping, API URL, empty responses)
 tests/test_slack.py   - 22 tests (formatting, auth.test, conversations.open, message sending, file upload)
 tests/test_avatar.py  - 13 tests (auth.test, users.info, avatar extraction, fallbacks)
 tests/test_image.py   - 14 tests (prompt composition, OpenAI mock, fallback placeholder, styles)
-tests/test_agent.py   - 15 tests (system prompt, demo mode, tool wrappers, auth checks)
+tests/test_agent.py   - 33 tests (system prompt, demo mode, tool wrappers, auth, Arcade OAuth, capabilities)
 tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
 ```
 
@@ -104,9 +113,11 @@ tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
                         ┌─────────────────────────┐
                         │     Interactive Agent    │
                         │  (OpenAI Agents SDK)     │
-                        │  gpt-4o-mini + 6 tools   │
+                        │  gpt-4o-mini + 7 tools   │
                         └────────────┬────────────┘
                                      │ @function_tool wrappers
+                                     │ (includes save_image_locally,
+                                     │  agent-only tool)
 ┌────────────────────────────────────▼────────────────────────────────────┐
 │                        Meow Art MCP Server                             │
 │                    (arcade-mcp-server, 6 tools)                        │
@@ -123,6 +134,7 @@ tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
 │    ├── Download avatar from URL                                        │
 │    ├── Compose style prompt + cat fact                                  │
 │    └── OpenAI gpt-image-1 images.edit → 1024x1024 PNG                  │
+│        (runs in asyncio.to_thread to avoid blocking)                   │
 │                                                                        │
 │  meow_me               (Slack OAuth: chat:write, im:write,             │
 │    ├── auth.test → get user ID                files:write, users:read) │
@@ -131,6 +143,7 @@ tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
 │    ├── users.info → get avatar URL                                     │
 │    ├── gpt-image-1 → generate cat art (fallback: text-only)            │
 │    └── files.upload → DM image + caption                               │
+│        (or save locally + text DM when files:write unavailable)        │
 │                                                                        │
 │  send_cat_fact         (Slack OAuth: chat:write)                       │
 │    ├── MeowFacts → fetch N facts                                       │
@@ -147,6 +160,12 @@ tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
                         │       MCP Clients        │
                         │ Claude Desktop | Cursor  │
                         └─────────────────────────┘
+
+Auth Resolution (CLI Agent):
+  1. Cached token (session-level)
+  2. SLACK_BOT_TOKEN env var (full access including file uploads)
+  3. Arcade OAuth (ARCADE_API_KEY → browser auth → token)
+     ⚠ Arcade's Slack provider does NOT support files:write
 ```
 
 ---
@@ -180,9 +199,13 @@ Phase 2 — Delivery Options
   → Display only: shows fact/image in chat, no Slack send
 ```
 
+### Progress & ASCII Preview
+
+The agent prints real-time progress during tool execution (`>> Fetching cat fact...`, `>> Generating cartoon cat art...`) and renders ASCII art previews of generated images in the terminal using Pillow.
+
 ---
 
-## MCP Tools
+## MCP Tools (6 server + 1 agent-only)
 
 | Tool | Auth | Description |
 |------|------|-------------|
@@ -192,6 +215,7 @@ Phase 2 — Delivery Options
 | `meow_me` | Slack OAuth (full scopes) | One-shot: fact + avatar + image + DM self |
 | `send_cat_fact` | Slack OAuth (`chat:write`) | Send 1-3 text cat facts to a channel |
 | `send_cat_image` | Slack OAuth (`chat:write`, `files:write`) | Upload image + caption to a channel |
+| `save_image_locally` | None (agent-only) | Save generated image to local file + show ASCII preview |
 
 ---
 
@@ -200,11 +224,28 @@ Phase 2 — Delivery Options
 ```bash
 # .env (gitignored)
 OPENAI_API_KEY=sk-...          # For agent LLM (gpt-4o-mini) AND image generation (gpt-image-1)
-SLACK_BOT_TOKEN=xoxb-...       # Optional: direct Slack auth for agent mode
-ARCADE_API_KEY=arc-...         # Optional: for Arcade platform (Slack OAuth routing)
+SLACK_BOT_TOKEN=xoxb-...       # Optional: direct Slack auth (supports ALL features incl. image upload)
+ARCADE_API_KEY=arc-...         # Optional: Arcade platform auth (Slack OAuth, text + avatars only)
+ARCADE_USER_ID=you@email.com   # Optional: skip the email prompt during Arcade OAuth
 ```
 
-The MCP server tools get Slack tokens via Arcade's OAuth. The standalone agent checks `SLACK_BOT_TOKEN` for direct Slack access.
+### Slack Auth in Agent Mode
+
+The CLI agent resolves Slack tokens using a 3-tier strategy:
+
+1. **Session cache** - reuses token within a session
+2. **`SLACK_BOT_TOKEN` env var** - direct token, supports all features including `files:write` for image uploads
+3. **Arcade OAuth** (`ARCADE_API_KEY`) - opens browser for Slack authorization. Supports `chat:write`, `im:write`, `users:read`. **Does NOT support `files:write`** (Arcade platform limitation), so image uploads to Slack are unavailable; images are saved locally + shown as ASCII art instead.
+
+The MCP server tools get Slack tokens via Arcade's built-in OAuth provider at runtime.
+
+---
+
+## Known Limitations
+
+- **Arcade OAuth + image upload**: Arcade's Slack provider does not support the `files:write` scope. When using Arcade OAuth (instead of a direct `SLACK_BOT_TOKEN`), the `send_cat_image` tool and image upload in `meow_me` are unavailable. The agent falls back to: generate image → save locally → show ASCII preview → send text-only fact to DM.
+- **Image generation time**: `gpt-image-1` takes 30-60 seconds per image. The agent shows a progress indicator while generating.
+- **`send_cat_image` requires `SLACK_BOT_TOKEN`**: Since Arcade OAuth can't grant `files:write`, image uploads to Slack channels only work with a direct bot token.
 
 ---
 
@@ -214,7 +255,7 @@ The MCP server tools get Slack tokens via Arcade's OAuth. The standalone agent c
 meow_me/
 ├── src/meow_me/
 │   ├── server.py          # MCPApp entry point (registers all tool modules)
-│   ├── agent.py           # LLM agent (OpenAI Agents SDK) + demo mode
+│   ├── agent.py           # LLM agent (OpenAI Agents SDK) + demo mode + ASCII preview
 │   ├── __main__.py        # python -m meow_me support
 │   └── tools/
 │       ├── facts.py       # MeowFacts API (get_cat_fact, no auth)
@@ -222,12 +263,12 @@ meow_me/
 │       ├── image.py       # OpenAI image generation (generate_cat_image)
 │       └── slack.py       # Slack messaging + file upload (meow_me, send_cat_fact, send_cat_image)
 ├── tests/
-│   ├── test_facts.py      # Fact parsing & fetching
-│   ├── test_avatar.py     # Slack avatar extraction & fallbacks
-│   ├── test_image.py      # Prompt composition, OpenAI mock, placeholder fallback
-│   ├── test_slack.py      # Message sending, file upload flow
-│   ├── test_agent.py      # System prompt, demo mode, tool wrappers
-│   └── test_evals.py      # End-to-end evaluation scenarios
+│   ├── test_facts.py      # Fact parsing & fetching (11 tests)
+│   ├── test_avatar.py     # Slack avatar extraction & fallbacks (13 tests)
+│   ├── test_image.py      # Prompt composition, OpenAI mock, placeholder fallback (14 tests)
+│   ├── test_slack.py      # Message sending, file upload flow (22 tests)
+│   ├── test_agent.py      # System prompt, demo, tool wrappers, auth, Arcade OAuth (33 tests)
+│   └── test_evals.py      # End-to-end evaluation scenarios (8 tests)
 ├── pyproject.toml
 └── .env                   # API keys (gitignored)
 ```
@@ -244,12 +285,14 @@ The MCP server tools use Arcade's **built-in Slack OAuth provider** - no manual 
 
 ### Required Slack Scopes
 
-| Scope | Used by |
-|-------|---------|
-| `chat:write` | `meow_me`, `send_cat_fact`, `send_cat_image` - post messages |
-| `im:write` | `meow_me` - open DM conversation via `conversations.open` |
-| `files:write` | `meow_me`, `send_cat_image` - upload images via file upload API |
-| `users:read` | `meow_me`, `get_user_avatar` - retrieve avatar via `users.info` |
+| Scope | Used by | Arcade OAuth? |
+|-------|---------|---------------|
+| `chat:write` | `meow_me`, `send_cat_fact`, `send_cat_image` - post messages | Supported |
+| `im:write` | `meow_me` - open DM conversation via `conversations.open` | Supported |
+| `users:read` | `meow_me`, `get_user_avatar` - retrieve avatar via `users.info` | Supported |
+| `files:write` | `meow_me`, `send_cat_image` - upload images via file upload API | **NOT supported** by Arcade |
+
+> **Note:** `files:write` is only available with a direct `SLACK_BOT_TOKEN`. When using Arcade OAuth, image uploads are replaced with local save + ASCII preview.
 
 ---
 
@@ -260,11 +303,16 @@ The MCP server tools use Arcade's **built-in Slack OAuth provider** - no manual 
 | Agent framework | OpenAI Agents SDK | Arcade's recommended framework; clean function_tool integration |
 | Agent LLM | gpt-4o-mini | Fast, cheap, sufficient for tool routing |
 | Image generation | OpenAI gpt-image-1 (`images.edit`) | Same API key as agent LLM; accepts avatar as input image |
+| Async image gen | `asyncio.to_thread()` | gpt-image-1 uses sync `OpenAI()` client; thread avoids blocking the event loop |
 | Image delivery | Slack file upload API (`getUploadURLExternal` flow) | Modern Slack file sharing; `files.upload` is deprecated |
+| Arcade OAuth fallback | Text DM + local save + ASCII preview | Graceful degradation when `files:write` is unavailable |
+| ASCII art preview | Pillow grayscale → character mapping | Immediate visual feedback in terminal without needing an image viewer |
+| Progress output | `_progress()` helper with `flush=True` | `Runner.run()` is non-streaming; progress prints keep the user informed |
+| 3-tier Slack auth | Cache → env var → Arcade OAuth | Maximum flexibility; works with or without Arcade platform |
 | Fallback behavior | Text-only when OPENAI_API_KEY missing | Full pipeline still completes; placeholder PNG for `generate_cat_image` |
 | Avatar input | BytesIO with `.name = "avatar.png"` | OpenAI SDK needs named file-like object for MIME type detection |
 | External API | MeowFacts | Free, no auth, structured JSON |
-| Slack auth | Arcade built-in Slack provider | Zero setup - demonstrates Arcade's core OAuth value |
+| Slack auth (MCP) | Arcade built-in Slack provider | Zero setup - demonstrates Arcade's core OAuth value |
 | Count limits | get_cat_fact: 1-5, send_cat_fact: 1-3 | Prevent spam while allowing batch sends |
 
 ---
@@ -274,6 +322,7 @@ The MCP server tools use Arcade's **built-in Slack OAuth provider** - no manual 
 - [Arcade MCP Server](https://docs.arcade.dev) - MCP server framework with OAuth
 - [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) - Agent framework with function tools
 - [OpenAI gpt-image-1](https://platform.openai.com/docs/guides/image-generation) - Image-to-image generation
+- [Pillow](https://python-pillow.org/) - Image processing (ASCII art preview)
 - [MeowFacts API](https://meowfacts.herokuapp.com/) - Random cat facts
 - [httpx](https://www.python-httpx.org/) - Async HTTP client
 - [uv](https://docs.astral.sh/uv/) - Python package management

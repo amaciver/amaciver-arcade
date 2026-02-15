@@ -11,6 +11,8 @@ from meow_me.agent import (
     _build_tools,
     _detect_capabilities,
     _build_capability_prompt,
+    _get_slack_token,
+    _slack_token,
     run_demo,
 )
 
@@ -116,10 +118,11 @@ class TestToolWrappers:
 
     @pytest.mark.asyncio
     async def test_get_user_avatar_requires_token(self):
-        """get_user_avatar should return error when SLACK_BOT_TOKEN is not set."""
+        """get_user_avatar should return error when no Slack auth is available."""
         tools = _build_tools()
         tool = next(t for t in tools if t.name == "get_user_avatar")
 
+        _slack_token["token"] = ""  # Clear cached token
         with patch.dict("os.environ", {}, clear=True):
             result_str = await tool.on_invoke_tool({"input": "{}"}, "")
 
@@ -129,10 +132,11 @@ class TestToolWrappers:
 
     @pytest.mark.asyncio
     async def test_meow_me_requires_token(self):
-        """meow_me should return error when SLACK_BOT_TOKEN is not set."""
+        """meow_me should return error when no Slack auth is available."""
         tools = _build_tools()
         tool = next(t for t in tools if t.name == "meow_me")
 
+        _slack_token["token"] = ""  # Clear cached token
         with patch.dict("os.environ", {}, clear=True):
             result_str = await tool.on_invoke_tool({"input": "{}"}, "")
 
@@ -186,25 +190,163 @@ class TestCapabilityDetection:
             caps = _detect_capabilities()
         assert caps["openai"] is False
         assert caps["slack"] is False
+        assert caps["arcade"] is False
+        assert caps["slack_available"] is False
 
     def test_detects_openai_key(self):
         with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=True):
             caps = _detect_capabilities()
         assert caps["openai"] is True
         assert caps["slack"] is False
+        assert caps["slack_available"] is False
 
     def test_detects_slack_token(self):
         with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}, clear=True):
             caps = _detect_capabilities()
         assert caps["slack"] is True
         assert caps["openai"] is False
+        assert caps["slack_available"] is True
+
+    def test_detects_arcade_key(self):
+        with patch.dict("os.environ", {"ARCADE_API_KEY": "arc-test"}, clear=True):
+            caps = _detect_capabilities()
+        assert caps["arcade"] is True
+        assert caps["slack"] is False
+        assert caps["slack_available"] is True
+
+    def test_slack_available_with_both(self):
+        with patch.dict("os.environ", {
+            "SLACK_BOT_TOKEN": "xoxb-test", "ARCADE_API_KEY": "arc-test"
+        }, clear=True):
+            caps = _detect_capabilities()
+        assert caps["slack"] is True
+        assert caps["arcade"] is True
+        assert caps["slack_available"] is True
 
     def test_capability_prompt_no_slack(self):
-        prompt = _build_capability_prompt({"openai": True, "slack": False})
+        prompt = _build_capability_prompt({
+            "openai": True, "slack": False, "arcade": False, "slack_available": False,
+        })
         assert "NOT AVAILABLE" in prompt
         assert "Do NOT call meow_me" in prompt
 
     def test_capability_prompt_all_available(self):
-        prompt = _build_capability_prompt({"openai": True, "slack": True})
+        prompt = _build_capability_prompt({
+            "openai": True, "slack": True, "arcade": False, "slack_available": True,
+        })
         assert "CONNECTED" in prompt
         assert "AVAILABLE" in prompt
+
+    def test_capability_prompt_arcade_only(self):
+        prompt = _build_capability_prompt({
+            "openai": True, "slack": False, "arcade": True, "slack_available": True,
+        })
+        assert "Arcade OAuth" in prompt
+        assert "AVAILABLE" in prompt
+        assert "Do NOT call meow_me" not in prompt
+        assert "send_cat_image does NOT work" in prompt
+
+
+# --- Slack token resolution ---
+
+class TestGetSlackToken:
+    def setup_method(self):
+        """Clear token cache before each test."""
+        _slack_token["token"] = ""
+
+    def test_returns_cached_token(self):
+        _slack_token["token"] = "xoxb-cached"
+        assert _get_slack_token() == "xoxb-cached"
+
+    def test_returns_env_var_token(self):
+        with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-env"}, clear=True):
+            token = _get_slack_token()
+        assert token == "xoxb-env"
+        assert _slack_token["token"] == "xoxb-env"
+
+    def test_caches_env_var_token(self):
+        with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-env"}, clear=True):
+            _get_slack_token()
+        # Token should be cached even after env is restored
+        assert _slack_token["token"] == "xoxb-env"
+
+    def test_returns_empty_when_no_auth(self):
+        with patch.dict("os.environ", {}, clear=True):
+            token = _get_slack_token()
+        assert token == ""
+
+    def test_arcade_oauth_flow(self):
+        """Test Arcade OAuth flow with mocked arcadepy client."""
+        mock_auth_response = MagicMock()
+        mock_auth_response.status = "completed"
+        mock_auth_response.context.token = "xoxb-arcade"
+
+        mock_client = MagicMock()
+        mock_client.auth.start.return_value = mock_auth_response
+        mock_client.auth.wait_for_completion.return_value = mock_auth_response
+
+        mock_arcade_class = MagicMock(return_value=mock_client)
+
+        with patch.dict("os.environ", {
+            "ARCADE_API_KEY": "arc-test",
+            "ARCADE_USER_ID": "test@example.com",
+        }, clear=True):
+            with patch.dict("sys.modules", {"arcadepy": MagicMock(Arcade=mock_arcade_class)}):
+                with patch("meow_me.agent.Arcade", mock_arcade_class, create=True):
+                    # We need to reimport to pick up the mock - instead just call directly
+                    # The function does `from arcadepy import Arcade` inside the try block
+                    import importlib
+                    import meow_me.agent as agent_mod
+                    # Patch at the import level
+                    with patch("builtins.__import__", side_effect=lambda name, *args, **kwargs: (
+                        MagicMock(Arcade=mock_arcade_class) if name == "arcadepy"
+                        else importlib.__import__(name, *args, **kwargs)
+                    )):
+                        token = _get_slack_token()
+
+        assert token == "xoxb-arcade"
+        assert _slack_token["token"] == "xoxb-arcade"
+
+    def test_arcade_oauth_prompts_for_email(self):
+        """Test that Arcade OAuth prompts for email when ARCADE_USER_ID is not set."""
+        mock_auth_response = MagicMock()
+        mock_auth_response.status = "completed"
+        mock_auth_response.context.token = "xoxb-prompted"
+
+        mock_client = MagicMock()
+        mock_client.auth.start.return_value = mock_auth_response
+        mock_client.auth.wait_for_completion.return_value = mock_auth_response
+
+        mock_arcade_class = MagicMock(return_value=mock_client)
+
+        with patch.dict("os.environ", {"ARCADE_API_KEY": "arc-test"}, clear=True):
+            with patch("builtins.input", return_value="user@example.com"):
+                import importlib
+                with patch("builtins.__import__", side_effect=lambda name, *args, **kwargs: (
+                    MagicMock(Arcade=mock_arcade_class) if name == "arcadepy"
+                    else importlib.__import__(name, *args, **kwargs)
+                )):
+                    token = _get_slack_token()
+
+        assert token == "xoxb-prompted"
+
+    def test_arcade_oauth_empty_email_returns_empty(self):
+        """Test that empty email input skips Arcade OAuth."""
+        with patch.dict("os.environ", {"ARCADE_API_KEY": "arc-test"}, clear=True):
+            with patch("builtins.input", return_value=""):
+                token = _get_slack_token()
+        assert token == ""
+
+    def test_arcade_oauth_failure_returns_empty(self):
+        """Test that Arcade OAuth failure returns empty string gracefully."""
+        with patch.dict("os.environ", {"ARCADE_API_KEY": "arc-test"}, clear=True):
+            with patch("builtins.__import__", side_effect=lambda name, *args, **kwargs: (
+                (_ for _ in ()).throw(Exception("connection failed")) if name == "arcadepy"
+                else __import__(name, *args, **kwargs)
+            )):
+                token = _get_slack_token()
+        assert token == ""
+
+    def teardown_method(self):
+        """Clean up token cache after each test."""
+        _slack_token["token"] = ""

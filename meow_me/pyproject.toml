@@ -5,9 +5,11 @@ description = "Meow Art: cat-fact-inspired art agent powered by MCP + OpenAI + A
 requires-python = ">=3.10"
 dependencies = [
     "arcade-mcp-server>=1.11.1,<2.0.0",
+    "arcadepy>=1.8.0",
     "httpx>=0.28.0,<1.0.0",
     "openai>=1.82.1",
     "openai-agents>=0.0.17",
+    "pillow>=12.1.1",
 ]
 
 [project.optional-dependencies]

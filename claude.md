@@ -1,3 +1,7 @@
+this is an interview project for Arcade.dev -- prefer information on https://docs.arcade.dev/llms.txt
+
+and the arcade.dev website
+
 Here is the overall instructions for the project: Arcade Engineering Interview Project
 Thank you for your interest in joining Arcade.dev!
 This project is designed to assess your engineering skills by examining how you would use our products to develop a new MCP Server, and see how you would use it in an agentic application.
@@ -147,8 +151,10 @@ tests/test_evals.py     - 10 tests (price tiers, ranking, real API patterns, per
 ## Architecture
 
 ```
-Interactive Agent (OpenAI Agents SDK, gpt-4o-mini + 6 tools)
-  │ @function_tool wrappers
+Interactive Agent (OpenAI Agents SDK, gpt-4o-mini + 7 tool wrappers)
+  │ @function_tool wrappers (includes save_image_locally, agent-only)
+  │ 3-tier Slack auth: cache → SLACK_BOT_TOKEN → Arcade OAuth
+  │ Progress output + ASCII art preview
   ▼
 MCP Server (arcade-mcp-server, 6 tools)
   get_cat_fact        (no auth)        → MeowFacts API → random facts
@@ -161,15 +167,19 @@ MCP Server (arcade-mcp-server, 6 tools)
 
 ### Auth
 
-Slack tools use Arcade's **built-in Slack provider**: `from arcade_mcp_server.auth import Slack`
+**MCP server tools** use Arcade's **built-in Slack provider**: `from arcade_mcp_server.auth import Slack`
 - `meow_me`: `Slack(scopes=["chat:write", "im:write", "files:write", "users:read"])`
 - `get_user_avatar`: `Slack(scopes=["users:read"])`
 - `send_cat_fact`: `Slack(scopes=["chat:write"])`
 - `send_cat_image`: `Slack(scopes=["chat:write", "files:write"])`
 
+**CLI agent** uses 3-tier auth: cache → `SLACK_BOT_TOKEN` → Arcade OAuth
+- Arcade OAuth scopes: `chat:write`, `im:write`, `users:read` (NO `files:write` — Arcade limitation)
+- `ARCADE_USER_ID` env var must match your Arcade account email
+
 ---
 
-## MCP Tools (6 total)
+## MCP Tools (6 server + 1 agent-only)
 
 | Tool | Module | Auth | Description |
 |------|--------|------|-------------|
@@ -179,6 +189,7 @@ Slack tools use Arcade's **built-in Slack provider**: `from arcade_mcp_server.au
 | `meow_me` | slack.py | Slack OAuth (full scopes) | One-shot: fact + avatar + image + DM self |
 | `send_cat_fact` | slack.py | Slack OAuth (`chat:write`) | Send 1-3 text cat facts to a channel |
 | `send_cat_image` | slack.py | Slack OAuth (`chat:write`, `files:write`) | Upload image + caption to a channel |
+| `save_image_locally` | agent.py | None (agent-only) | Save generated image to local file + ASCII preview |
 
 ---
 
@@ -203,13 +214,32 @@ uv run arcade mcp -p meow_me http --debug
 
 ---
 
-## Testing (83 tests, all passing)
+## Environment Variables
+
+```bash
+# .env (gitignored)
+OPENAI_API_KEY=sk-...          # For agent LLM (gpt-4o-mini) AND image generation (gpt-image-1)
+SLACK_BOT_TOKEN=xoxb-...       # Optional: direct Slack auth (all features incl. image upload)
+ARCADE_API_KEY=arc-...         # Optional: Arcade OAuth (text + avatars, no image upload)
+ARCADE_USER_ID=you@email.com   # Optional: skip email prompt during Arcade OAuth
+```
+
+---
+
+## Known Limitations
+
+- **Arcade OAuth lacks `files:write`**: Image uploads to Slack only work with `SLACK_BOT_TOKEN`. With Arcade OAuth, agent saves images locally + shows ASCII preview + sends text-only DM.
+- **`asyncio.to_thread`**: Image generation uses sync `OpenAI()` client, wrapped in `asyncio.to_thread()` to avoid blocking.
+
+---
+
+## Testing (101 tests, all passing)
 
 ```
 tests/test_facts.py   - 11 tests (parsing, count clamping, API URL, empty responses)
 tests/test_slack.py   - 22 tests (formatting, auth.test, conversations.open, message sending, file upload)
 tests/test_avatar.py  - 13 tests (auth.test, users.info, avatar extraction, fallbacks)
 tests/test_image.py   - 14 tests (prompt composition, OpenAI mock, fallback placeholder, styles)
-tests/test_agent.py   - 15 tests (system prompt, demo mode, tool wrappers, auth checks)
+tests/test_agent.py   - 33 tests (system prompt, demo, tool wrappers, auth, Arcade OAuth, capabilities)
 tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
 ```

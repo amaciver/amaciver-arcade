@@ -1,5 +1,6 @@
 """Image generation tools - create cat-themed art from avatars using OpenAI."""
 
+import asyncio
 import base64
 import io
 import os
@@ -113,8 +114,8 @@ async def generate_cat_image(
     # Download avatar
     avatar_bytes = await _download_avatar(avatar_url)
 
-    # Generate image
-    image_b64 = _generate_image_openai(avatar_bytes, prompt)
+    # Generate image (sync call, run in thread to avoid blocking event loop)
+    image_b64 = await asyncio.to_thread(_generate_image_openai, avatar_bytes, prompt)
 
     return {
         "image_base64": image_b64,

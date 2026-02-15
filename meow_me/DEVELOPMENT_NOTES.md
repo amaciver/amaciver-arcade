@@ -144,3 +144,79 @@ Total: 83 tests, all passing
 - **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)** v0.0.17 - Agent framework with `@function_tool`
 - **[OpenAI gpt-image-1](https://platform.openai.com/docs/guides/image-generation)** - Image-to-image generation via `images.edit`
 - **[OpenAI gpt-4o-mini](https://platform.openai.com/docs/models)** - Agent LLM for tool routing
+
+---
+
+## Session 3: CLI Agent Polish, Arcade OAuth & ASCII Preview
+
+### Objective
+Make the CLI agent work end-to-end: fix hanging issues, add Arcade OAuth as an alternative to direct `SLACK_BOT_TOKEN`, add progress output and ASCII art preview, and handle Arcade's Slack scope limitations gracefully.
+
+### Problems Solved
+
+1. **Agent "hanging" on `meow me`**: `Runner.run()` is non-streaming — zero output while the LLM thinks and tools execute. Added a `_progress()` helper with `flush=True` to print step-by-step progress (`>> Fetching cat fact...`, `>> Generating cartoon cat art...`, etc.) and a "Thinking..." indicator in the chat loop.
+
+2. **Image generation blocking the event loop**: `_generate_image_openai()` uses the sync `OpenAI()` client, which blocks the async event loop when called from async tool wrappers. Fixed by wrapping with `asyncio.to_thread()` in both `agent.py` and `tools/image.py`.
+
+3. **Arcade OAuth integration**: Added 3-tier Slack token resolution: session cache → `SLACK_BOT_TOKEN` env var → Arcade OAuth. The Arcade flow uses `arcadepy.Arcade().auth.start()` with browser-based authorization.
+
+4. **Arcade `files:write` scope not supported**: Arcade's Slack provider returns `400 malformed_request: requesting unsupported scopes: files:write`. Removed `files:write` from CLI agent's `SLACK_SCOPES`. When using Arcade OAuth, `meow_me` generates the image + shows ASCII preview + saves locally + sends text-only fact to DM.
+
+5. **Arcade OAuth user_id mismatch**: The `user_id` passed to `auth.start()` must match the signed-in Arcade account email. Changed from hardcoded default to: check `ARCADE_USER_ID` env var → prompt user for email interactively → skip gracefully if empty.
+
+### Changes
+
+**`agent.py` (major updates):**
+- Added `_progress(msg)` helper — prints `>> msg` with `flush=True`
+- Added `_image_to_ascii(image_bytes, width=60)` — PIL grayscale → ASCII character mapping
+- Added `_slack_token` cache dict + `SLACK_SCOPES` constant (without `files:write`)
+- Added `_get_slack_token()` — 3-tier auth: cache → `SLACK_BOT_TOKEN` → Arcade OAuth
+- All tool wrappers now print progress indicators
+- `generate_cat_image` wrapper shows ASCII preview in terminal
+- `save_image_locally` wrapper shows ASCII preview and handles errors gracefully
+- `meow_me` wrapper checks `can_upload = bool(os.getenv("SLACK_BOT_TOKEN"))` — saves locally + ASCII when Arcade OAuth
+- `_detect_capabilities()` returns `arcade` and `slack_available` keys
+- `_build_capability_prompt()` includes Arcade-specific messaging about scope limitations
+- `run_agent()` authenticates Slack at startup (not lazily inside tools)
+- Moved Slack auth to startup banner with status display
+
+**`tools/image.py`:**
+- Added `asyncio.to_thread()` wrapper around `_generate_image_openai` call
+
+**`pyproject.toml`:**
+- Added `pillow>=12.1.1` dependency (for ASCII art preview)
+
+**`test_agent.py` (33 tests, up from 15):**
+- Added `_get_slack_token` and `_slack_token` imports
+- Auth-required tool tests clear `_slack_token["token"]` cache
+- `TestCapabilityDetection`: tests for `arcade`, `slack_available` keys, Arcade-only prompt
+- `TestGetSlackToken`: 8 tests — cache, env var, caching, no auth, Arcade OAuth flow, email prompt, empty email, OAuth failure
+
+### Gotchas
+
+9. **`Runner.run()` is non-streaming**: The OpenAI Agents SDK's `Runner.run()` returns only after all tool calls complete. No built-in progress callback. Solution: print progress from inside `@function_tool` wrappers with `flush=True`.
+
+10. **Sync OpenAI client in async context**: `_generate_image_openai()` uses `OpenAI()` (sync), not `AsyncOpenAI()`. Calling it directly from an async function blocks the entire event loop for 30-60 seconds. Wrap with `asyncio.to_thread()`.
+
+11. **`print()` buffering**: Python buffers stdout by default. Auth URLs and progress messages don't appear until the buffer flushes. Fix: `flush=True` on every `print()` in the agent.
+
+12. **Arcade Slack OAuth scopes**: Arcade's built-in Slack provider supports `chat:write`, `im:write`, `users:read`, `channels:read` — but **NOT `files:write`**. Requesting unsupported scopes returns `400 malformed_request`. Design the agent to gracefully degrade when file uploads aren't available.
+
+13. **Arcade OAuth `user_id` must match account**: The `user_id` parameter in `client.auth.start()` must exactly match the email of the signed-in Arcade account. A mismatch produces a browser error: "Your code provided the user ID: X but the currently signed-in Arcade account is: Y". Use `ARCADE_USER_ID` env var or prompt interactively.
+
+### Test Coverage (Session 3)
+
+```
+tests/test_facts.py   - 11 tests (parsing, count clamping, API URL, empty responses)
+tests/test_slack.py   - 22 tests (formatting, auth.test, conversations.open, message sending, file upload)
+tests/test_avatar.py  - 13 tests (auth.test, users.info, avatar extraction, fallbacks)
+tests/test_image.py   - 14 tests (prompt composition, OpenAI mock, fallback placeholder, styles)
+tests/test_agent.py   - 33 tests (system prompt, demo, tool wrappers, auth, Arcade OAuth, capabilities)
+tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
+Total: 101 tests, all passing
+```
+
+### Tools & Frameworks (Session 3 additions)
+
+- **[Pillow](https://python-pillow.org/)** v12.1.1 - Image processing for ASCII art preview
+- **[arcadepy](https://github.com/ArcadeAI/arcade-py)** - Arcade OAuth client for CLI agent Slack auth
