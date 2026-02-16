@@ -12,6 +12,7 @@ from meow_me.tools.slack import (
     _open_dm_channel,
     _send_slack_message,
     _resolve_channel_id,
+    _ensure_bot_in_channel,
     _get_upload_url,
     _upload_file_bytes,
     _complete_upload,
@@ -495,3 +496,68 @@ class TestResolveChannelId:
             result = await _resolve_channel_id("xoxb-token", "#general")
 
         assert result == "#general"
+
+
+# --- Tests for _ensure_bot_in_channel ---
+
+class TestEnsureBotInChannel:
+    @pytest.mark.asyncio
+    async def test_skips_dm_channels(self):
+        """DM channels (D...) should not trigger conversations.join."""
+        # If it tried to make an API call, it would fail since we don't mock httpx
+        await _ensure_bot_in_channel("xoxb-token", "D01234567")
+
+    @pytest.mark.asyncio
+    async def test_joins_public_channel(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True, "channel": {"id": "C123"}}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("meow_me.tools.slack.httpx.AsyncClient", return_value=mock_client):
+            await _ensure_bot_in_channel("xoxb-token", "C01234567")
+
+        call_args = mock_client.post.call_args
+        assert "conversations.join" in call_args[0][0]
+        assert call_args[1]["json"]["channel"] == "C01234567"
+
+    @pytest.mark.asyncio
+    async def test_handles_missing_scope_gracefully(self):
+        """Missing channels:join scope should not raise."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": False, "error": "missing_scope"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("meow_me.tools.slack.httpx.AsyncClient", return_value=mock_client):
+            await _ensure_bot_in_channel("xoxb-token", "C01234567")
+        # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_handles_already_in_channel(self):
+        """already_in_channel error should not raise."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": False, "error": "already_in_channel"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("meow_me.tools.slack.httpx.AsyncClient", return_value=mock_client):
+            await _ensure_bot_in_channel("xoxb-token", "C01234567")
+        # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_skips_empty_channel(self):
+        """Empty channel string should be a no-op."""
+        await _ensure_bot_in_channel("xoxb-token", "")

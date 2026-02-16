@@ -459,7 +459,8 @@ def _build_tools():
                 "success": True, "channel": channel, "file_id": upload_info["file_id"],
             })
         except Exception as e:
-            _progress(f"Image upload failed ({e}), sending text instead...")
+            print(f"  >> [error] send_cat_image upload failed: {e}", flush=True)
+            _progress("Sending text fallback instead...")
             message = _format_cat_fact_message(cat_fact)
             await _send_slack_message(token, channel, message)
             return json.dumps({

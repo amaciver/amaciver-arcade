@@ -327,8 +327,10 @@ The MCP server tools use Arcade's **built-in Slack OAuth provider** - no manual 
 | `im:write` | `meow_me` - open DM conversation via `conversations.open` | Supported |
 | `users:read` | `meow_me`, `get_user_avatar` - retrieve avatar via `users.info` | Supported |
 | `files:write` | Image upload via Slack file upload API (not requested by MCP tools) | **NOT supported** by Arcade |
+| `channels:read` | `send_cat_image` - resolve channel names to IDs for file uploads | N/A (bot token only) |
+| `channels:join` | `send_cat_image` - ensure bot is in the target channel before upload | N/A (bot token only) |
 
-> **Note:** The MCP tools no longer request `files:write` in their OAuth scopes since Arcade doesn't support it. Image upload is attempted at runtime and falls back to text-only if the token lacks `files:write`. For full image upload support, use a direct `SLACK_BOT_TOKEN` with `files:write` scope.
+> **Note:** The MCP tools no longer request `files:write` in their OAuth scopes since Arcade doesn't support it. Image upload is attempted at runtime and falls back to text-only if the token lacks `files:write`. For full image upload support, use a direct `SLACK_BOT_TOKEN` with all the scopes above.
 
 ---
 

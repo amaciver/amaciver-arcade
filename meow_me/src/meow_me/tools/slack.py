@@ -210,7 +210,7 @@ async def _resolve_channel_id(token: str, channel: str) -> str:
         async with httpx.AsyncClient() as client:
             cursor = ""
             while True:
-                params: dict = {"limit": "200", "types": "public_channel,private_channel"}
+                params: dict = {"limit": "200", "types": "public_channel"}
                 if cursor:
                     params["cursor"] = cursor
                 response = await client.get(
@@ -241,6 +241,36 @@ async def _resolve_channel_id(token: str, channel: str) -> str:
         return channel
 
     raise RuntimeError(f"Channel '{channel}' not found in workspace")
+
+
+async def _ensure_bot_in_channel(token: str, channel_id: str) -> None:
+    """Join a public channel if not already a member (no-op for DMs).
+
+    Calls conversations.join which is idempotent — returns ok=True even if
+    the bot is already in the channel. Silently ignores missing_scope and
+    method_not_allowed_for_channel_type errors.
+    """
+    if not channel_id or channel_id[0] == "D":
+        return  # DMs don't need joining
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{SLACK_API_BASE}/conversations.join",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"channel": channel_id},
+        )
+        response.raise_for_status()
+        data = response.json()
+    # Silently ignore non-critical errors
+    error = data.get("error", "")
+    if not data.get("ok") and error not in (
+        "missing_scope",
+        "method_not_allowed_for_channel_type",
+        "already_in_channel",
+    ):
+        print(f"  >> [warn] conversations.join({channel_id}): {error}", flush=True)
 
 
 async def _get_upload_url(token: str, filename: str, length: int) -> dict:
@@ -277,9 +307,12 @@ async def _complete_upload(
     """Complete the file upload via files.completeUploadExternal.
 
     Resolves channel names (e.g. '#general') to channel IDs automatically,
-    since this API endpoint requires a channel ID.
+    since this API endpoint requires a channel ID. Also ensures the bot is
+    in the target channel before sharing the file.
     """
     channel_id = await _resolve_channel_id(token, channel)
+    print(f"  >> [debug] _complete_upload: channel='{channel}' -> resolved='{channel_id}'", flush=True)
+    await _ensure_bot_in_channel(token, channel_id)
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{SLACK_API_BASE}/files.completeUploadExternal",
@@ -295,6 +328,7 @@ async def _complete_upload(
         )
         response.raise_for_status()
         data = response.json()
+    print(f"  >> [debug] files.completeUploadExternal response ok={data.get('ok')} error={data.get('error', 'none')}", flush=True)
     if not data.get("ok"):
         raise RuntimeError(
             f"Slack files.completeUploadExternal failed: {data.get('error', 'unknown')}"
