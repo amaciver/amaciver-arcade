@@ -3,12 +3,15 @@
 import asyncio
 import base64
 import io
+import logging
 import os
 from typing import Annotated
 
 import httpx
 from arcade_mcp_server import tool
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 STYLE_PROMPTS = {
     "cartoon": (
@@ -77,6 +80,24 @@ def _generate_image_openai(avatar_bytes: bytes, prompt: str) -> str:
     return b64
 
 
+def _make_preview_thumbnail(png_b64: str, size: int = 512, quality: int = 80) -> str:
+    """Compress a full-res PNG (base64) into a small JPEG thumbnail (base64).
+
+    Used for MCP ImageContent so Claude Desktop can display a preview
+    without the full ~2MB PNG going through the transport.
+    """
+    from PIL import Image
+
+    png_bytes = base64.b64decode(png_b64)
+    img = Image.open(io.BytesIO(png_bytes))
+    img = img.resize((size, size), Image.LANCZOS)
+    img = img.convert("RGB")  # JPEG doesn't support alpha
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 # Tiny 1x1 transparent PNG as fallback placeholder
 _PLACEHOLDER_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
@@ -96,25 +117,53 @@ def get_last_generated_image() -> dict:
 
 @tool
 async def generate_cat_image(
-    cat_fact: Annotated[str, "The cat fact to incorporate into the image"],
-    avatar_url: Annotated[str, "URL of the user's avatar image"],
+    cat_fact: Annotated[str, "The cat fact to incorporate into the image. Call get_cat_fact first to get one."],
+    avatar_url: Annotated[str, "Full HTTPS URL of the user's avatar image. Call get_user_avatar first to get this URL."],
     style: Annotated[str, "Art style: cartoon, watercolor, anime, or photorealistic"] = "cartoon",
 ) -> dict:
     """Generate a cat-themed image by transforming a user's avatar.
 
-    Downloads the avatar, composes a prompt from the cat fact and style,
-    and uses OpenAI's gpt-image-1 to create stylized cat art.
+    IMPORTANT: Before calling this tool, you must first call:
+    1. get_user_avatar - to get the avatar_url
+    2. get_cat_fact - to get a cat_fact
+
+    Then pass the avatar_url string and cat_fact string to this tool.
 
     The generated image is stored server-side. To send it to Slack, call
     send_cat_image with image_base64 set to '__last__'.
-
-    Falls back with an error message if OPENAI_API_KEY is not set.
     """
+    logger.debug(
+        "generate_cat_image called: cat_fact=%r, avatar_url=%r, style=%r",
+        cat_fact, avatar_url, style,
+    )
+
+    # Validate inputs
+    if not avatar_url or avatar_url == "None":
+        return {
+            "error": (
+                "avatar_url is missing. Call get_user_avatar first, then pass "
+                "the 'avatar_url' value from its response to this tool."
+            ),
+            "cat_fact": cat_fact or "",
+            "style": style if style in STYLE_PROMPTS else DEFAULT_STYLE,
+        }
+
+    if not cat_fact or cat_fact == "None":
+        return {
+            "error": (
+                "cat_fact is missing. Call get_cat_fact first, then pass "
+                "one of the facts to this tool."
+            ),
+            "avatar_url": avatar_url,
+            "style": style if style in STYLE_PROMPTS else DEFAULT_STYLE,
+        }
+
     style = style if style in STYLE_PROMPTS else DEFAULT_STYLE
     prompt = _compose_prompt(cat_fact, style)
 
     # Check for OpenAI API key
     if not os.getenv("OPENAI_API_KEY"):
+        logger.error("OPENAI_API_KEY not set")
         return {
             "error": "OPENAI_API_KEY not set. Image generation requires an OpenAI API key.",
             "prompt_used": prompt,
@@ -124,8 +173,11 @@ async def generate_cat_image(
 
     try:
         # Download avatar
+        logger.debug("Downloading avatar from %s", avatar_url)
         avatar_bytes = await _download_avatar(avatar_url)
+        logger.debug("Avatar downloaded: %d bytes", len(avatar_bytes))
     except Exception as e:
+        logger.error("Avatar download failed: %s", e)
         return {
             "error": f"Failed to download avatar from {avatar_url}: {e}",
             "style": style,
@@ -134,8 +186,11 @@ async def generate_cat_image(
 
     try:
         # Generate image (sync call, run in thread to avoid blocking event loop)
+        logger.debug("Calling OpenAI image generation...")
         image_b64 = await asyncio.to_thread(_generate_image_openai, avatar_bytes, prompt)
+        logger.debug("Image generated: %d bytes base64", len(image_b64))
     except Exception as e:
+        logger.error("Image generation failed: %s", e)
         return {
             "error": f"Image generation failed: {e}",
             "prompt_used": prompt,
@@ -143,17 +198,34 @@ async def generate_cat_image(
             "cat_fact": cat_fact,
         }
 
-    # Stash the image server-side (avoids sending ~1.5MB through LLM context)
+    # Stash the full-res image server-side (for send_cat_image and CLI agent)
     _last_generated_image.clear()
     _last_generated_image["base64"] = image_b64
     _last_generated_image["cat_fact"] = cat_fact
     _last_generated_image["style"] = style
 
-    return {
+    # Build a compressed JPEG thumbnail for inline display in Claude Desktop.
+    # Full-res PNG is ~2MB; thumbnail is ~50-100KB.
+    try:
+        preview_b64 = _make_preview_thumbnail(image_b64)
+        logger.debug("Preview thumbnail: %d bytes base64", len(preview_b64))
+    except Exception as e:
+        logger.warning("Thumbnail generation failed, skipping preview: %s", e)
+        preview_b64 = None
+
+    result = {
         "success": True,
         "prompt_used": prompt,
         "style": style,
         "cat_fact": cat_fact,
         "image_size_bytes": len(image_b64),
-        "hint": "Image stored server-side. Call send_cat_image with image_base64='__last__' to send it to Slack, or call meow_me for the full pipeline.",
+        "hint": "Image stored server-side. Call send_cat_image with image_base64='__last__' to send it to Slack.",
     }
+
+    # _mcp_image is intercepted by our patched convert_to_mcp_content
+    # and emitted as a real MCP ImageContent block, so Claude Desktop
+    # renders it inline instead of dumping base64 text.
+    if preview_b64:
+        result["_mcp_image"] = {"data": preview_b64, "mimeType": "image/jpeg"}
+
+    return result

@@ -220,3 +220,85 @@ Total: 101 tests, all passing
 
 - **[Pillow](https://python-pillow.org/)** v12.1.1 - Image processing for ASCII art preview
 - **[arcadepy](https://github.com/ArcadeAI/arcade-py)** - Arcade OAuth client for CLI agent Slack auth
+
+---
+
+## Session 4: Claude Desktop Integration, ImageContent & Thumbnail Compression
+
+### Objective
+Get `generate_cat_image` working end-to-end in Claude Desktop (MCP client), including inline image display. Fix multiple issues discovered during live testing.
+
+### Problems Solved
+
+1. **`OPENAI_API_KEY` not loaded in arcade MCP process**: `load_dotenv()` was only in `server.py`, which `arcade mcp -p meow_me stdio` never executes. Arcade discovers tools by scanning the package (importing `meow_me.tools.image`), which triggers `meow_me/__init__.py` but not `server.py`. Fix: moved `load_dotenv()` to `__init__.py`. Also added `OPENAI_API_KEY` directly to Claude Desktop's env config as a belt-and-suspenders measure.
+
+2. **`generate_cat_image` receiving `None` for `avatar_url`**: Claude Desktop's LLM was passing `None` instead of the URL string. `_download_avatar(None)` threw a confusing `TypeError`. Fix: added explicit None/empty validation for both `avatar_url` and `cat_fact` with error messages guiding the LLM to call prerequisite tools (`get_user_avatar`, `get_cat_fact`) first.
+
+3. **Images too large for Claude Desktop (~2MB PNGs)**: Full 1024x1024 PNG from `gpt-image-1` is ~2MB base64 (~2.7MB). Claude Desktop has a ~1MB limit on MCP tool result content. Fix: added `_make_preview_thumbnail()` using Pillow — resizes to 512x512 JPEG at 80% quality (~50-100KB).
+
+4. **arcade-mcp-server only returns TextContent**: `convert_to_mcp_content()` in arcade-mcp-server always returns `TextContent`, even though the MCP spec (and arcade's own `ImageContent` type) supports images in tool results. Fix: monkey-patch `convert_to_mcp_content` in `__init__.py` to detect `_mcp_image` key in return dicts and emit an `ImageContent` block alongside the `TextContent`.
+
+5. **`logging.basicConfig` silently ignored**: Arcade configures the root logger before our `__init__.py` runs, making `basicConfig()` a no-op. Debug log file was never created. Fix: added `force=True` parameter and file-based trace writes that bypass the logging framework entirely.
+
+### Changes
+
+**`meow_me/__init__.py` (NEW — critical for MCP server)**
+- `load_dotenv()` — ensures env vars are loaded regardless of entry point
+- Debug logging with `force=True` — overrides arcade's logging setup
+- `_install_image_content_patch()` — monkey-patches `convert_to_mcp_content` on both `arcade_mcp_server.convert` and `arcade_mcp_server.server` modules
+- File-based trace writes for debugging (bypasses logging framework)
+
+**`meow_me/server.py`:**
+- Removed `load_dotenv()` (now in `__init__.py`)
+- Simplified to just MCPApp creation and module imports
+
+**`meow_me/tools/image.py`:**
+- Input validation: returns helpful error messages for None/empty `avatar_url` or `cat_fact`
+- `_make_preview_thumbnail(png_b64, size=512, quality=80)` — Pillow resize + JPEG compress
+- `_mcp_image` key in successful results — intercepted by monkey-patch for Claude Desktop ImageContent
+- `_last_generated_image` dict + `get_last_generated_image()` accessor for server-side image stash
+- Debug logging throughout (all key steps: avatar download, image generation, thumbnail)
+- Thumbnail failure handled gracefully (result succeeds without `_mcp_image`)
+
+**`meow_me/tests/test_image.py` (26 tests, up from 14):**
+- `test_successful_generation` — mocks avatar download, OpenAI, and thumbnail; verifies `_mcp_image` and stash
+- `test_thumbnail_failure_omits_mcp_image` — PIL failure → success without `_mcp_image`
+- `test_none_avatar_url_returns_error` — validates error message mentions `get_user_avatar`
+- `test_empty_avatar_url_returns_error` — same for empty string
+- `test_none_cat_fact_returns_error` — validates error message mentions `get_cat_fact`
+- `test_error_results_have_no_mcp_image` — error responses never include `_mcp_image`
+- `TestMakePreviewThumbnail` (2 tests) — real Pillow resize, JPEG output, placeholder PNG
+- `TestImageContentPatch` (3 tests) — patched convert emits ImageContent, passthrough for normal dicts, both modules patched
+
+**Claude Desktop config** (`claude_desktop_config.json`):
+- Added `OPENAI_API_KEY` to meow-me server env
+- Added `MEOW_ME_DEBUG_LOG` for file-based debugging
+
+**Example images** (3 files in `meow_me/examples/`):
+- `orange_cats.png` — "80% of orange cats are male"
+- `siamese_cats.png` — "The color of the points in Siamese cats is heat related. Cool areas are darker."
+- `sleeping_cats.png` — "Cats sleep 16 to 18 hours per day"
+
+### Gotchas
+
+14. **`load_dotenv()` placement matters for arcade MCP**: When running `arcade mcp -p meow_me stdio`, arcade discovers tools by importing the package. It never executes `server.py`. Any initialization code (env loading, patches) must be in `__init__.py` to run in both the arcade MCP process and direct `python -m meow_me` entry points.
+
+15. **`logging.basicConfig` is a no-op when handlers exist**: Python's `basicConfig()` does nothing if the root logger already has handlers (arcade sets up loguru + logging before our code runs). Use `force=True` to override, or write directly to files for guaranteed tracing.
+
+16. **Monkey-patching `from` imports requires patching both modules**: When `server.py` does `from .convert import convert_to_mcp_content`, it creates a local binding. Patching `convert_mod.convert_to_mcp_content` alone doesn't affect `server.py`'s local reference. Must patch BOTH `convert_mod` and `server_mod`.
+
+17. **Claude Desktop ImageContent ~1MB limit**: Claude Desktop enforces approximately a 1MB limit on content in MCP tool results. The full gpt-image-1 PNG (~2MB) exceeds this. Compress to a JPEG thumbnail for the `_mcp_image` preview; keep the full-res PNG in the server-side stash for Slack uploads.
+
+18. **`value.pop("_mcp_image")` mutation timing**: In `_handle_call_tool`, `convert_to_mcp_content(result.value)` and `convert_content_to_structured_content(result.value)` are called on the SAME dict reference. Our patch pops `_mcp_image` during the first call, so the second call gets the dict without it. This is intentional — the structured content doesn't need the image data.
+
+### Test Coverage (Session 4)
+
+```
+tests/test_facts.py   - 11 tests (parsing, count clamping, API URL, empty responses)
+tests/test_slack.py   - 22 tests (formatting, auth.test, conversations.open, message sending, file upload)
+tests/test_avatar.py  - 13 tests (auth.test, users.info, avatar extraction, fallbacks)
+tests/test_image.py   - 26 tests (prompts, OpenAI mock, validation, thumbnail, ImageContent patch)
+tests/test_agent.py   - 33 tests (system prompt, demo, tool wrappers, auth, Arcade OAuth, capabilities)
+tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
+Total: 113 tests, all passing
+```

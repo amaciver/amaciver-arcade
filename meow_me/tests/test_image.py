@@ -9,6 +9,7 @@ from meow_me.tools.image import (
     _compose_prompt,
     _download_avatar,
     _make_png_file,
+    _make_preview_thumbnail,
     _last_generated_image,
     _PLACEHOLDER_PNG_B64,
     STYLE_PROMPTS,
@@ -126,6 +127,7 @@ class TestGenerateCatImage:
     async def test_successful_generation(self):
         fake_b64 = base64.b64encode(b"fake_image").decode()
         fake_avatar = b"\x89PNGfake"
+        fake_thumb = base64.b64encode(b"thumbnail").decode()
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
             with patch(
@@ -137,20 +139,57 @@ class TestGenerateCatImage:
                     "meow_me.tools.image._generate_image_openai",
                     return_value=fake_b64,
                 ):
-                    result = await generate_cat_image(
-                        cat_fact="Cats purr at 25 Hz",
-                        avatar_url="https://example.com/avatar.png",
-                        style="watercolor",
-                    )
+                    with patch(
+                        "meow_me.tools.image._make_preview_thumbnail",
+                        return_value=fake_thumb,
+                    ):
+                        result = await generate_cat_image(
+                            cat_fact="Cats purr at 25 Hz",
+                            avatar_url="https://example.com/avatar.png",
+                            style="watercolor",
+                        )
 
         assert result["success"] is True
-        assert "image_base64" not in result  # base64 is stashed, not returned
         assert result["cat_fact"] == "Cats purr at 25 Hz"
         assert result["style"] == "watercolor"
         assert "watercolor" in result["prompt_used"].lower()
-        # Verify server-side stash
+        # _mcp_image contains compressed JPEG thumbnail (not the full PNG)
+        assert "_mcp_image" in result
+        assert result["_mcp_image"]["data"] == fake_thumb
+        assert result["_mcp_image"]["mimeType"] == "image/jpeg"
+        # Server-side stash has the full-res PNG
         assert _last_generated_image["base64"] == fake_b64
         assert _last_generated_image["cat_fact"] == "Cats purr at 25 Hz"
+
+    @pytest.mark.asyncio
+    async def test_thumbnail_failure_omits_mcp_image(self):
+        """If thumbnail generation fails, result still succeeds without _mcp_image."""
+        fake_b64 = base64.b64encode(b"fake_image").decode()
+        fake_avatar = b"\x89PNGfake"
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
+            with patch(
+                "meow_me.tools.image._download_avatar",
+                new_callable=AsyncMock,
+                return_value=fake_avatar,
+            ):
+                with patch(
+                    "meow_me.tools.image._generate_image_openai",
+                    return_value=fake_b64,
+                ):
+                    with patch(
+                        "meow_me.tools.image._make_preview_thumbnail",
+                        side_effect=Exception("PIL failed"),
+                    ):
+                        result = await generate_cat_image(
+                            cat_fact="Test",
+                            avatar_url="https://example.com/avatar.png",
+                        )
+
+        assert result["success"] is True
+        assert "_mcp_image" not in result
+        # Stash still has the full image
+        assert _last_generated_image["base64"] == fake_b64
 
     @pytest.mark.asyncio
     async def test_invalid_style_defaults_to_cartoon(self):
@@ -206,5 +245,116 @@ class TestGenerateCatImage:
         assert "error" in result
         assert "generation failed" in result["error"].lower()
 
+    @pytest.mark.asyncio
+    async def test_none_avatar_url_returns_error(self):
+        result = await generate_cat_image(
+            cat_fact="Cats are great",
+            avatar_url=None,
+        )
+        assert "error" in result
+        assert "avatar_url" in result["error"].lower()
+        assert "get_user_avatar" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_empty_avatar_url_returns_error(self):
+        result = await generate_cat_image(
+            cat_fact="Cats are great",
+            avatar_url="",
+        )
+        assert "error" in result
+        assert "avatar_url" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_none_cat_fact_returns_error(self):
+        result = await generate_cat_image(
+            cat_fact=None,
+            avatar_url="https://example.com/avatar.png",
+        )
+        assert "error" in result
+        assert "cat_fact" in result["error"].lower()
+        assert "get_cat_fact" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_error_results_have_no_mcp_image(self):
+        """Error responses should not include _mcp_image."""
+        with patch.dict("os.environ", {}, clear=True):
+            result = await generate_cat_image(
+                cat_fact="Test",
+                avatar_url="https://example.com/avatar.png",
+            )
+        assert "error" in result
+        assert "_mcp_image" not in result
+
     def teardown_method(self):
         _last_generated_image.clear()
+
+
+# --- Tests for _make_preview_thumbnail ---
+
+class TestMakePreviewThumbnail:
+    def test_produces_smaller_output(self):
+        """Thumbnail should be significantly smaller than the original."""
+        # Create a real 4x4 PNG to thumbnail
+        from PIL import Image
+        import io
+
+        img = Image.new("RGBA", (100, 100), (255, 0, 0, 255))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        original_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        thumb_b64 = _make_preview_thumbnail(original_b64, size=50, quality=60)
+        # Thumbnail should be valid base64
+        thumb_bytes = base64.b64decode(thumb_b64)
+        assert len(thumb_bytes) > 0
+        # Thumbnail should be JPEG (starts with FFD8)
+        assert thumb_bytes[:2] == b"\xff\xd8"
+
+    def test_uses_placeholder_png(self):
+        """Should work with the placeholder 1x1 PNG."""
+        thumb_b64 = _make_preview_thumbnail(_PLACEHOLDER_PNG_B64, size=32)
+        thumb_bytes = base64.b64decode(thumb_b64)
+        assert thumb_bytes[:2] == b"\xff\xd8"  # JPEG magic
+
+
+# --- Tests for ImageContent monkey-patch ---
+
+class TestImageContentPatch:
+    def test_patched_convert_emits_image_content(self):
+        """When a dict has _mcp_image, the patch emits ImageContent."""
+        from arcade_mcp_server.convert import convert_to_mcp_content
+        from arcade_mcp_server.types import ImageContent, TextContent
+
+        fake_b64 = base64.b64encode(b"test_image").decode()
+        value = {
+            "success": True,
+            "cat_fact": "Cats purr",
+            "_mcp_image": {"data": fake_b64, "mimeType": "image/png"},
+        }
+        blocks = convert_to_mcp_content(value)
+        text_blocks = [b for b in blocks if isinstance(b, TextContent)]
+        image_blocks = [b for b in blocks if isinstance(b, ImageContent)]
+
+        assert len(image_blocks) == 1
+        assert image_blocks[0].data == fake_b64
+        assert image_blocks[0].mimeType == "image/png"
+        assert len(text_blocks) >= 1
+
+    def test_patched_convert_passes_through_normal_dicts(self):
+        """Dicts without _mcp_image go through the original path."""
+        from arcade_mcp_server.convert import convert_to_mcp_content
+        from arcade_mcp_server.types import ImageContent, TextContent
+
+        value = {"success": True, "message": "hello"}
+        blocks = convert_to_mcp_content(value)
+        image_blocks = [b for b in blocks if isinstance(b, ImageContent)]
+
+        assert len(image_blocks) == 0
+        assert len(blocks) >= 1
+
+    def test_server_module_also_patched(self):
+        """The server module's reference should also be patched."""
+        import arcade_mcp_server.convert as convert_mod
+        import arcade_mcp_server.server as server_mod
+
+        assert server_mod.convert_to_mcp_content is convert_mod.convert_to_mcp_content

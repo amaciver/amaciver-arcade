@@ -159,7 +159,7 @@ Interactive Agent (OpenAI Agents SDK, gpt-4o-mini + 7 tool wrappers)
 MCP Server (arcade-mcp-server, 6 tools)
   get_cat_fact        (no auth)        → MeowFacts API → random facts
   get_user_avatar     (Slack OAuth)    → auth.test + users.info → avatar URL + display name
-  generate_cat_image  (no auth)        → download avatar + gpt-image-1 images.edit → base64 PNG
+  generate_cat_image  (no auth)        → download avatar + gpt-image-1 → stash PNG + JPEG thumbnail
   meow_me             (Slack OAuth)    → fact + avatar + image gen + file upload → DM self
   send_cat_fact       (Slack OAuth)    → MeowFacts + chat.postMessage → send to channel
   send_cat_image      (Slack OAuth)    → file upload API → upload image to channel
@@ -230,16 +230,18 @@ ARCADE_USER_ID=you@email.com   # Optional: skip email prompt during Arcade OAuth
 
 - **Arcade OAuth lacks `files:write`**: Image uploads to Slack only work with `SLACK_BOT_TOKEN`. With Arcade OAuth, agent saves images locally + shows ASCII preview + sends text-only DM.
 - **`asyncio.to_thread`**: Image generation uses sync `OpenAI()` client, wrapped in `asyncio.to_thread()` to avoid blocking.
+- **arcade-mcp-server ImageContent**: Framework only returns `TextContent`; monkey-patched in `__init__.py` to also emit `ImageContent`.
+- **Claude Desktop ~1MB content limit**: Full PNG (~2MB) too large; compressed JPEG thumbnail (~50-100KB) sent as preview.
 
 ---
 
-## Testing (101 tests, all passing)
+## Testing (113 tests, all passing)
 
 ```
 tests/test_facts.py   - 11 tests (parsing, count clamping, API URL, empty responses)
 tests/test_slack.py   - 22 tests (formatting, auth.test, conversations.open, message sending, file upload)
 tests/test_avatar.py  - 13 tests (auth.test, users.info, avatar extraction, fallbacks)
-tests/test_image.py   - 14 tests (prompt composition, OpenAI mock, fallback placeholder, styles)
+tests/test_image.py   - 26 tests (prompts, validation, thumbnail, ImageContent patch)
 tests/test_agent.py   - 33 tests (system prompt, demo, tool wrappers, auth, Arcade OAuth, capabilities)
 tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
 ```

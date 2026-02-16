@@ -8,9 +8,9 @@ Two MCP server toolkits built with [Arcade.dev](https://arcade.dev), demonstrati
 
 MCP server (7 tools, 46 tests) that searches for real sushi restaurants via Google Places API, generates price-calibrated menus, ranks tuna rolls by price, and simulates ordering. Demonstrates `requires_secrets` for API keys and dual auth (API key + custom OAuth2 provider).
 
-### [Meow Me](meow_me/) - Slack Yourself a Cat Fact
+### [Meow Art (meow_me)](meow_me/) - Cat-Fact-Inspired Art Agent
 
-MCP server (3 tools, 34 tests) that fetches random cat facts from the MeowFacts API and sends them to you via Slack DM. Demonstrates Arcade's built-in Slack OAuth provider (`requires_auth=Slack`).
+MCP server (6 tools, 113 tests) + LLM-powered CLI agent that fetches cat facts, generates cat-themed art from your Slack avatar using OpenAI's gpt-image-1, and sends results to Slack. Demonstrates Arcade's built-in Slack OAuth provider, MCP ImageContent for inline image previews, and an interactive agent built with the OpenAI Agents SDK.
 
 ## Quick Start
 
@@ -41,7 +41,7 @@ cd ../meow_me && uv sync --all-extras && uv run python -m meow_me --demo
 # Sushi Scout (46 tests)
 cd sushi_scout && uv run pytest -v
 
-# Meow Me (34 tests)
+# Meow Art (113 tests)
 cd ../meow_me && uv run pytest -v
 ```
 
@@ -50,7 +50,7 @@ cd ../meow_me && uv run pytest -v
 To use these as MCP servers with Claude Desktop (or Cursor, VS Code, etc.), see the setup instructions in each project's README:
 
 - [Sushi Scout - Claude Desktop setup](sushi_scout/README.md#3-connect-to-a-real-mcp-client)
-- [Meow Me - Claude Desktop setup](meow_me/README.md#3-connect-to-a-real-mcp-client)
+- [Meow Art - Claude Desktop setup](meow_me/README.md#4-connect-as-mcp-server)
 
 ## Built With
 
