@@ -10,7 +10,7 @@ MCP server (7 tools, 46 tests) that searches for real sushi restaurants via Goog
 
 ### [Meow Art (meow_me)](meow_me/) - Cat-Fact-Inspired Art Agent
 
-MCP server (6 tools, 113 tests) + LLM-powered CLI agent that fetches cat facts, generates cat-themed art from your Slack avatar using OpenAI's gpt-image-1, and sends results to Slack. Demonstrates Arcade's built-in Slack OAuth provider, MCP ImageContent for inline image previews, and an interactive agent built with the OpenAI Agents SDK.
+MCP server (6 tools, 138 tests) + LLM-powered CLI agent that fetches cat facts, generates cat-themed art from your Slack avatar using OpenAI's gpt-image-1, and sends results to Slack. Demonstrates Arcade's built-in Slack OAuth provider, MCP ImageContent for inline image previews, and an interactive agent built with the OpenAI Agents SDK.
 
 ## Quick Start
 
@@ -41,7 +41,7 @@ cd ../meow_me && uv sync --all-extras && uv run python -m meow_me --demo
 # Sushi Scout (46 tests)
 cd sushi_scout && uv run pytest -v
 
-# Meow Art (113 tests)
+# Meow Art (138 tests)
 cd ../meow_me && uv run pytest -v
 ```
 

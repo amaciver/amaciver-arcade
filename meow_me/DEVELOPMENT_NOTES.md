@@ -302,3 +302,62 @@ tests/test_agent.py   - 33 tests (system prompt, demo, tool wrappers, auth, Arca
 tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
 Total: 113 tests, all passing
 ```
+
+---
+
+## Session 5: --slack Flag, User Resolution, Channel Upload Fix
+
+### Objective
+Make `--slack` bot token mode fully functional: fix user identity resolution (bot token's `auth.test` returns the bot, not the human), fix image upload to channels (worked for DMs but failed for public channels like #general), and add robustness around channel name resolution and bot membership.
+
+### Problems Solved
+
+1. **Bot token `auth.test` returns bot identity**: When using `SLACK_BOT_TOKEN`, `auth.test` returns the bot's user ID, not the human operator's. `get_user_avatar` and `meow_me` would retrieve the bot's avatar and DM the bot instead of the user. Fix: at agent startup in `--slack` mode, prompt for the user's Slack username, look them up via `users.list`, and cache the resolved user ID for the session.
+
+2. **`files.completeUploadExternal` requires channel ID, not name**: `chat.postMessage` resolves channel names (`#general`) automatically, but `files.completeUploadExternal` strictly requires a channel ID (`C01234567`). Text messages to channels worked, but image uploads silently failed. Fix: added `_resolve_channel_id()` to convert channel names to IDs via `conversations.list`.
+
+3. **`conversations.list` scope requirements**: Requesting `types: "public_channel,private_channel"` requires BOTH `channels:read` AND `groups:read` scopes. With only `channels:read`, the API returns `missing_scope`, causing `_resolve_channel_id` to fall back to the raw channel name, which then fails at `files.completeUploadExternal`. Fix: changed to `types: "public_channel"` only, which only needs `channels:read`.
+
+4. **Bot not guaranteed to be in channel**: Even if the bot was manually added to a channel, file uploads can fail if the bot isn't recognized as a member. Fix: added `_ensure_bot_in_channel()` which calls `conversations.join` (idempotent) before uploading. Silently handles `missing_scope`, `already_in_channel`, and `method_not_allowed_for_channel_type`.
+
+### Changes
+
+**`tools/slack.py`:**
+- Added `_resolve_channel_id(token, channel)` — resolves `#general` or `general` to `C...` ID via `conversations.list`. Short-circuits for C/G/D-prefixed IDs. Falls back to raw value on `missing_scope`.
+- Added `_ensure_bot_in_channel(token, channel_id)` — calls `conversations.join`, silently handles non-critical errors.
+- Updated `_complete_upload()` — calls `_resolve_channel_id` then `_ensure_bot_in_channel` before `files.completeUploadExternal`. Added debug prints for troubleshooting.
+
+**`agent.py`:**
+- Added `--slack` CLI flag — sets `_slack_config["use_direct_token"] = True`
+- Added `_fetch_slack_users()`, `_match_users()`, `_resolve_human_user()` — user lookup at startup
+- Added `_get_target_user_id()` — returns cached human user ID in `--slack` mode
+- Tool wrappers (`get_user_avatar`, `meow_me`) use resolved human user instead of `auth.test` result
+- Improved `send_cat_image` wrapper error output with `[error]` prefix and text fallback
+- Added capability detection for `slack` vs `arcade` modes
+
+**`tests/test_slack.py` (34 tests, up from 22):**
+- 7 tests for `_resolve_channel_id`: passthrough for C/G/D IDs, resolves names, handles `#` prefix, raises on not found, falls back on `missing_scope`
+- 5 tests for `_ensure_bot_in_channel`: skips DMs, joins public channels, handles `missing_scope`, handles `already_in_channel`, skips empty channel
+
+**`tests/test_agent.py` (46 tests, up from 33):**
+- Tests for `--slack` mode, user resolution, capability detection, target user caching
+
+### Gotchas
+
+19. **Slack `conversations.list` type filtering**: Requesting `types: "public_channel,private_channel"` requires two scopes: `channels:read` for public channels and `groups:read` for private channels. If you only have `channels:read`, the entire request fails with `missing_scope` rather than returning just public channels. Always request only the types you have scopes for.
+
+20. **`files.completeUploadExternal` vs `chat.postMessage` channel handling**: `chat.postMessage` accepts channel names (`#general`) and resolves them internally. `files.completeUploadExternal` requires an explicit channel ID (`C01234567`). This asymmetry is not well documented in Slack's API docs.
+
+21. **`conversations.join` is idempotent**: Returns `ok: true` even if the bot is already in the channel. This makes it safe to call as a pre-upload step without checking membership first. However, it requires the `channels:join` scope, which may not be available — handle `missing_scope` gracefully.
+
+### Test Coverage (Session 5)
+
+```
+tests/test_facts.py   - 11 tests (parsing, count clamping, API URL, empty responses)
+tests/test_slack.py   - 34 tests (formatting, auth, DM, messaging, file upload, channel resolution, bot membership)
+tests/test_avatar.py  - 13 tests (auth.test, users.info, avatar extraction, fallbacks)
+tests/test_image.py   - 26 tests (prompts, OpenAI mock, validation, thumbnail, ImageContent patch)
+tests/test_agent.py   - 46 tests (system prompt, demo, tool wrappers, auth, Arcade OAuth, --slack mode)
+tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
+Total: 138 tests, all passing
+```

@@ -235,13 +235,13 @@ ARCADE_USER_ID=you@email.com   # Optional: skip email prompt during Arcade OAuth
 
 ---
 
-## Testing (113 tests, all passing)
+## Testing (138 tests, all passing)
 
 ```
 tests/test_facts.py   - 11 tests (parsing, count clamping, API URL, empty responses)
-tests/test_slack.py   - 22 tests (formatting, auth.test, conversations.open, message sending, file upload)
+tests/test_slack.py   - 34 tests (formatting, auth, DM, messaging, file upload, channel resolution, bot membership)
 tests/test_avatar.py  - 13 tests (auth.test, users.info, avatar extraction, fallbacks)
 tests/test_image.py   - 26 tests (prompts, validation, thumbnail, ImageContent patch)
-tests/test_agent.py   - 33 tests (system prompt, demo, tool wrappers, auth, Arcade OAuth, capabilities)
+tests/test_agent.py   - 46 tests (system prompt, demo, tool wrappers, auth, Arcade OAuth, capabilities)
 tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
 ```
