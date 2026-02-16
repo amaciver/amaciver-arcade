@@ -168,10 +168,10 @@ MCP Server (arcade-mcp-server, 6 tools)
 ### Auth
 
 **MCP server tools** use Arcade's **built-in Slack provider**: `from arcade_mcp_server.auth import Slack`
-- `meow_me`: `Slack(scopes=["chat:write", "im:write", "files:write", "users:read"])`
+- `meow_me`: `Slack(scopes=["chat:write", "im:write", "users:read"])` — falls back to text-only if files:write unavailable
 - `get_user_avatar`: `Slack(scopes=["users:read"])`
 - `send_cat_fact`: `Slack(scopes=["chat:write"])`
-- `send_cat_image`: `Slack(scopes=["chat:write", "files:write"])`
+- `send_cat_image`: `Slack(scopes=["chat:write"])` — tries file upload, falls back to text if files:write unavailable
 
 **CLI agent** uses 3-tier auth: cache → `SLACK_BOT_TOKEN` → Arcade OAuth
 - Arcade OAuth scopes: `chat:write`, `im:write`, `users:read` (NO `files:write` — Arcade limitation)

@@ -88,7 +88,7 @@ async def _send_slack_message(token: str, channel: str, text: str) -> dict:
     }
 
 
-@tool(requires_auth=Slack(scopes=["chat:write", "im:write", "files:write", "users:read"]))
+@tool(requires_auth=Slack(scopes=["chat:write", "im:write", "users:read"]))
 async def meow_me(
     context: Context,
 ) -> dict:
@@ -97,6 +97,11 @@ async def meow_me(
     One-shot pipeline: fetches a cat fact, retrieves your avatar, generates
     a stylized cat-themed image from your avatar, and DMs the result to you.
     Falls back to text-only if image generation is unavailable.
+
+    Note: Image upload requires a Slack token with files:write scope.
+    Arcade's built-in Slack OAuth does not support files:write, so image
+    uploads only work with a direct SLACK_BOT_TOKEN. When files:write is
+    unavailable, this tool sends a text-only cat fact to your DMs.
     """
     token = context.get_auth_token_or_empty()
 
@@ -240,7 +245,7 @@ async def _complete_upload(
     return data
 
 
-@tool(requires_auth=Slack(scopes=["chat:write", "files:write"]))
+@tool(requires_auth=Slack(scopes=["chat:write"]))
 async def send_cat_image(
     context: Context,
     image_base64: Annotated[str, "Base64-encoded PNG image data"],
@@ -251,25 +256,37 @@ async def send_cat_image(
 
     Takes a base64-encoded image (from generate_cat_image) and uploads it
     to the specified Slack channel using the file upload API.
+
+    Note: Requires a Slack token with files:write scope for file uploads.
+    Arcade's built-in Slack OAuth does not support files:write, so this tool
+    only works with a direct SLACK_BOT_TOKEN. If file upload fails due to
+    missing scope, falls back to sending the cat fact as text.
     """
     token = context.get_auth_token_or_empty()
 
     # Decode image
     image_bytes = base64.b64decode(image_base64)
 
-    # Step 1: Get upload URL
-    upload_info = await _get_upload_url(token, "meow_art.png", len(image_bytes))
-
-    # Step 2: Upload the file bytes
-    await _upload_file_bytes(upload_info["upload_url"], image_bytes)
-
-    # Step 3: Complete the upload and share to channel
-    caption = _format_cat_fact_message(cat_fact)
-    await _complete_upload(token, upload_info["file_id"], channel, caption)
-
-    return {
-        "success": True,
-        "channel": channel,
-        "file_id": upload_info["file_id"],
-        "cat_fact": cat_fact,
-    }
+    # Try file upload (requires files:write scope on the token)
+    try:
+        upload_info = await _get_upload_url(token, "meow_art.png", len(image_bytes))
+        await _upload_file_bytes(upload_info["upload_url"], image_bytes)
+        caption = _format_cat_fact_message(cat_fact)
+        await _complete_upload(token, upload_info["file_id"], channel, caption)
+        return {
+            "success": True,
+            "channel": channel,
+            "file_id": upload_info["file_id"],
+            "cat_fact": cat_fact,
+        }
+    except Exception as e:
+        # Fallback: send text-only if file upload fails (e.g. missing files:write scope)
+        message = _format_cat_fact_message(cat_fact)
+        text_result = await _send_slack_message(token, channel, message)
+        return {
+            "success": True,
+            "channel": channel,
+            "cat_fact": cat_fact,
+            "image_uploaded": False,
+            "fallback_reason": f"File upload failed ({e}), sent text-only fact instead.",
+        }
