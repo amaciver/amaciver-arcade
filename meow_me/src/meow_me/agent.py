@@ -217,23 +217,32 @@ def _build_tools():
         result = await _generate_cat_image(
             cat_fact=cat_fact, avatar_url=avatar_url, style=style
         )
-        # Stash the full base64 for save_image_locally / send_cat_image
-        image_b64 = result.get("image_base64", "")
+
+        # Check for errors from the MCP tool
+        if "error" in result:
+            _progress(f"Error: {result['error']}")
+            return json.dumps(result)
+
+        # The MCP tool stashes the image server-side; copy to agent's stash too
+        from meow_me.tools.image import get_last_generated_image
+        mcp_stash = get_last_generated_image()
+        image_b64 = mcp_stash.get("base64", "")
         _last_generated_image["base64"] = image_b64
         _last_generated_image["cat_fact"] = cat_fact
         _progress("Image generated!")
+
         # Show ASCII preview in terminal
-        if image_b64 and not result.get("fallback"):
+        if image_b64:
             import base64 as b64
             ascii_art = _image_to_ascii(b64.b64decode(image_b64))
             if ascii_art:
                 print("\n" + ascii_art + "\n", flush=True)
-        # Don't dump the full base64 to the LLM — just summarize
+
+        # Return summary (not the full base64)
         summary = {
             "style": result["style"],
             "cat_fact": result["cat_fact"],
-            "fallback": result.get("fallback", False),
-            "image_size_bytes": len(result.get("image_base64", "")),
+            "image_size_bytes": result.get("image_size_bytes", 0),
             "hint": "Use save_image_locally() or send_cat_image() with image_base64='__last__' to use this image.",
         }
         return json.dumps(summary)

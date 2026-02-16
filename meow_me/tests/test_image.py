@@ -9,6 +9,7 @@ from meow_me.tools.image import (
     _compose_prompt,
     _download_avatar,
     _make_png_file,
+    _last_generated_image,
     _PLACEHOLDER_PNG_B64,
     STYLE_PROMPTS,
     DEFAULT_STYLE,
@@ -100,20 +101,23 @@ class TestMakePngFile:
 # --- Tests for generate_cat_image tool ---
 
 class TestGenerateCatImage:
+    def setup_method(self):
+        _last_generated_image.clear()
+
     @pytest.mark.asyncio
-    async def test_fallback_when_no_api_key(self):
+    async def test_error_when_no_api_key(self):
         with patch.dict("os.environ", {}, clear=True):
             result = await generate_cat_image(
                 cat_fact="Cats are great",
                 avatar_url="https://example.com/avatar.png",
             )
-        assert result["fallback"] is True
-        assert result["image_base64"] == _PLACEHOLDER_PNG_B64
+        assert "error" in result
+        assert "OPENAI_API_KEY" in result["error"]
         assert result["cat_fact"] == "Cats are great"
         assert result["style"] == "cartoon"
 
     @pytest.mark.asyncio
-    async def test_fallback_image_is_valid_base64(self):
+    async def test_placeholder_is_valid_base64(self):
         decoded = base64.b64decode(_PLACEHOLDER_PNG_B64)
         # Should start with PNG magic bytes
         assert decoded[:4] == b"\x89PNG"
@@ -139,11 +143,14 @@ class TestGenerateCatImage:
                         style="watercolor",
                     )
 
-        assert result["fallback"] is False
-        assert result["image_base64"] == fake_b64
+        assert result["success"] is True
+        assert "image_base64" not in result  # base64 is stashed, not returned
         assert result["cat_fact"] == "Cats purr at 25 Hz"
         assert result["style"] == "watercolor"
         assert "watercolor" in result["prompt_used"].lower()
+        # Verify server-side stash
+        assert _last_generated_image["base64"] == fake_b64
+        assert _last_generated_image["cat_fact"] == "Cats purr at 25 Hz"
 
     @pytest.mark.asyncio
     async def test_invalid_style_defaults_to_cartoon(self):
@@ -162,4 +169,42 @@ class TestGenerateCatImage:
                 cat_fact="Cats have 230 bones",
                 avatar_url="https://example.com/avatar.png",
             )
-        assert "Cats have 230 bones" in result["prompt_used"]
+        # No prompt_used when error (no API key), but the fact is in the result
+        assert result["cat_fact"] == "Cats have 230 bones"
+
+    @pytest.mark.asyncio
+    async def test_avatar_download_failure(self):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
+            with patch(
+                "meow_me.tools.image._download_avatar",
+                new_callable=AsyncMock,
+                side_effect=Exception("Connection refused"),
+            ):
+                result = await generate_cat_image(
+                    cat_fact="Test",
+                    avatar_url="https://bad-url.com/avatar.png",
+                )
+        assert "error" in result
+        assert "download avatar" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_openai_generation_failure(self):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
+            with patch(
+                "meow_me.tools.image._download_avatar",
+                new_callable=AsyncMock,
+                return_value=b"fake_avatar",
+            ):
+                with patch(
+                    "meow_me.tools.image._generate_image_openai",
+                    side_effect=Exception("API rate limit"),
+                ):
+                    result = await generate_cat_image(
+                        cat_fact="Test",
+                        avatar_url="https://example.com/avatar.png",
+                    )
+        assert "error" in result
+        assert "generation failed" in result["error"].lower()
+
+    def teardown_method(self):
+        _last_generated_image.clear()

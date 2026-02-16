@@ -3,6 +3,10 @@
 
 import sys
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from arcade_mcp_server import MCPApp
 
 app = MCPApp(name="meow_me", version="0.1.0", log_level="DEBUG")

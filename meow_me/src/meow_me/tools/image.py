@@ -83,6 +83,16 @@ _PLACEHOLDER_PNG_B64 = (
     "2mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 )
 
+# Server-side stash for the most recently generated image.
+# This avoids sending ~1.5MB base64 through the LLM context.
+# Tools like send_cat_image can reference it via "__last__".
+_last_generated_image: dict = {}
+
+
+def get_last_generated_image() -> dict:
+    """Get the last generated image stash (used by send_cat_image)."""
+    return _last_generated_image
+
 
 @tool
 async def generate_cat_image(
@@ -94,9 +104,11 @@ async def generate_cat_image(
 
     Downloads the avatar, composes a prompt from the cat fact and style,
     and uses OpenAI's gpt-image-1 to create stylized cat art.
-    Returns base64-encoded PNG image data.
 
-    Falls back to a placeholder image if OPENAI_API_KEY is not set.
+    The generated image is stored server-side. To send it to Slack, call
+    send_cat_image with image_base64 set to '__last__'.
+
+    Falls back with an error message if OPENAI_API_KEY is not set.
     """
     style = style if style in STYLE_PROMPTS else DEFAULT_STYLE
     prompt = _compose_prompt(cat_fact, style)
@@ -104,23 +116,44 @@ async def generate_cat_image(
     # Check for OpenAI API key
     if not os.getenv("OPENAI_API_KEY"):
         return {
-            "image_base64": _PLACEHOLDER_PNG_B64,
+            "error": "OPENAI_API_KEY not set. Image generation requires an OpenAI API key.",
             "prompt_used": prompt,
             "style": style,
             "cat_fact": cat_fact,
-            "fallback": True,
         }
 
-    # Download avatar
-    avatar_bytes = await _download_avatar(avatar_url)
+    try:
+        # Download avatar
+        avatar_bytes = await _download_avatar(avatar_url)
+    except Exception as e:
+        return {
+            "error": f"Failed to download avatar from {avatar_url}: {e}",
+            "style": style,
+            "cat_fact": cat_fact,
+        }
 
-    # Generate image (sync call, run in thread to avoid blocking event loop)
-    image_b64 = await asyncio.to_thread(_generate_image_openai, avatar_bytes, prompt)
+    try:
+        # Generate image (sync call, run in thread to avoid blocking event loop)
+        image_b64 = await asyncio.to_thread(_generate_image_openai, avatar_bytes, prompt)
+    except Exception as e:
+        return {
+            "error": f"Image generation failed: {e}",
+            "prompt_used": prompt,
+            "style": style,
+            "cat_fact": cat_fact,
+        }
+
+    # Stash the image server-side (avoids sending ~1.5MB through LLM context)
+    _last_generated_image.clear()
+    _last_generated_image["base64"] = image_b64
+    _last_generated_image["cat_fact"] = cat_fact
+    _last_generated_image["style"] = style
 
     return {
-        "image_base64": image_b64,
+        "success": True,
         "prompt_used": prompt,
         "style": style,
         "cat_fact": cat_fact,
-        "fallback": False,
+        "image_size_bytes": len(image_b64),
+        "hint": "Image stored server-side. Call send_cat_image with image_base64='__last__' to send it to Slack, or call meow_me for the full pipeline.",
     }

@@ -248,21 +248,35 @@ async def _complete_upload(
 @tool(requires_auth=Slack(scopes=["chat:write"]))
 async def send_cat_image(
     context: Context,
-    image_base64: Annotated[str, "Base64-encoded PNG image data"],
     cat_fact: Annotated[str, "The cat fact to include as a caption"],
     channel: Annotated[str, "Slack channel ID or name (e.g. #general or C1234567890)"],
+    image_base64: Annotated[str, "Base64-encoded PNG data, or '__last__' to use the most recently generated image"] = "__last__",
 ) -> dict:
     """Upload a cat-themed image with a fact caption to a Slack channel.
 
     Takes a base64-encoded image (from generate_cat_image) and uploads it
     to the specified Slack channel using the file upload API.
 
+    Use image_base64='__last__' (default) to automatically use the image
+    from the most recent generate_cat_image call.
+
     Note: Requires a Slack token with files:write scope for file uploads.
     Arcade's built-in Slack OAuth does not support files:write, so this tool
-    only works with a direct SLACK_BOT_TOKEN. If file upload fails due to
-    missing scope, falls back to sending the cat fact as text.
+    falls back to sending the cat fact as text if file upload fails.
     """
     token = context.get_auth_token_or_empty()
+
+    # Resolve __last__ reference from server-side stash
+    if image_base64 == "__last__":
+        from meow_me.tools.image import get_last_generated_image
+        stash = get_last_generated_image()
+        if stash.get("base64"):
+            image_base64 = stash["base64"]
+            cat_fact = cat_fact or stash.get("cat_fact", "")
+        else:
+            return {
+                "error": "No image available. Call generate_cat_image first, then call send_cat_image.",
+            }
 
     # Decode image
     image_bytes = base64.b64decode(image_base64)
@@ -282,7 +296,7 @@ async def send_cat_image(
     except Exception as e:
         # Fallback: send text-only if file upload fails (e.g. missing files:write scope)
         message = _format_cat_fact_message(cat_fact)
-        text_result = await _send_slack_message(token, channel, message)
+        await _send_slack_message(token, channel, message)
         return {
             "success": True,
             "channel": channel,
