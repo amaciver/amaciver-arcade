@@ -1,58 +1,76 @@
-# Arcade.dev Interview Projects
+# Arcade.dev Interview Project
 
-Two MCP server toolkits built with [Arcade.dev](https://arcade.dev), demonstrating API integration, OAuth authentication, and agentic workflows.
+An MCP server toolkit and LLM-powered agent built with [Arcade.dev](https://arcade.dev), demonstrating OAuth integration, image generation, Slack API workflows, and agentic tool orchestration.
 
-## Projects
+## The Project: [Meow Art (meow_me)](meow_me/)
 
-### [Sushi Scout](sushi_scout/) - Find the Cheapest Tuna Roll
+MCP server (6 tools, 138 tests) + interactive CLI agent that fetches random cat facts, retrieves your Slack avatar, generates stylized cat-themed art via OpenAI's gpt-image-1, and sends the results to Slack. Supports both Arcade's built-in Slack OAuth and direct bot tokens.
 
-MCP server (7 tools, 46 tests) that searches for real sushi restaurants via Google Places API, generates price-calibrated menus, ranks tuna rolls by price, and simulates ordering. Demonstrates `requires_secrets` for API keys and dual auth (API key + custom OAuth2 provider).
-
-### [Meow Art (meow_me)](meow_me/) - Cat-Fact-Inspired Art Agent
-
-MCP server (6 tools, 138 tests) + LLM-powered CLI agent that fetches cat facts, generates cat-themed art from your Slack avatar using OpenAI's gpt-image-1, and sends results to Slack. Demonstrates Arcade's built-in Slack OAuth provider, MCP ImageContent for inline image previews, and an interactive agent built with the OpenAI Agents SDK.
+See [meow_me/README.md](meow_me/README.md) for full documentation, architecture, and setup instructions.
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.10+
-- [uv](https://docs.astral.sh/uv/)
-- [Arcade CLI](https://docs.arcade.dev) (`uv tool install arcade-mcp`)
-
-### Clone and try the demos
-
-The `--demo` commands run standalone in the terminal - no MCP client or API keys needed.
-
 ```bash
 git clone https://github.com/amaciver/amaciver-arcade.git
-cd amaciver-arcade
+cd amaciver-arcade/meow_me
+uv sync --all-extras
 
-# Sushi Scout demo - shows restaurant search + menu + ranking
-cd sushi_scout && uv sync --all-extras && uv run python -m sushi_scout --demo
+# Try the demo (no API keys needed)
+uv run python -m meow_me --demo
 
-# Meow Me demo - fetches and prints random cat facts
-cd ../meow_me && uv sync --all-extras && uv run python -m meow_me --demo
+# Run all 138 tests
+uv run pytest -v
+
+# Start as MCP server (for Claude Desktop / Cursor)
+uv run arcade mcp -p meow_me stdio
 ```
 
-### Run all tests
+## Development Journey
 
-```bash
-# Sushi Scout (46 tests)
-cd sushi_scout && uv run pytest -v
+This project was built across multiple sessions, each exploring different aspects of the Arcade platform. The learnings from each phase directly shaped the next.
 
-# Meow Art (138 tests)
-cd ../meow_me && uv run pytest -v
-```
+### Phase 1: Sushi Scout (archived)
 
-### Connect to Claude Desktop
+Started with [Sushi Scout](https://github.com/amaciver/amaciver-arcade-archive) -- an MCP server that finds the cheapest tuna sushi roll nearby using real Google Places API data, synthetic price-calibrated menus, and simulated ordering (7 tools, 46 tests).
 
-To use these as MCP servers with Claude Desktop (or Cursor, VS Code, etc.), see the setup instructions in each project's README:
+Sushi Scout was the learning ground for Arcade's core patterns:
+- How `@tool` registration works (module-level decorators, not closures)
+- How `requires_secrets` and `requires_auth` differ
+- Dual auth: API key default + custom `OAuth2` provider for Google Places
+- MCP protocol mechanics (STDIO vs HTTP transport, JSON-RPC framing)
+- Claude Desktop integration and Windows-specific gotchas
 
-- [Sushi Scout - Claude Desktop setup](sushi_scout/README.md#3-connect-to-a-real-mcp-client)
-- [Meow Art - Claude Desktop setup](meow_me/README.md#4-connect-as-mcp-server)
+The code is preserved in the [archive repo](https://github.com/amaciver/amaciver-arcade-archive) with full development notes.
+
+### Phase 2: Meow Art
+
+Armed with Arcade platform knowledge from Sushi Scout, built a more ambitious project combining:
+- **Arcade's built-in Slack OAuth** (vs custom provider in Sushi Scout)
+- **OpenAI image generation** (gpt-image-1 image-to-image with avatar input)
+- **MCP ImageContent** (monkey-patched arcade-mcp-server to return image previews)
+- **An interactive LLM agent** (OpenAI Agents SDK with 7 tool wrappers, progress output, ASCII art preview)
+- **3-tier Slack auth** (session cache, direct bot token, Arcade OAuth with graceful degradation)
+
+## Key Learnings: Arcade Platform
+
+Insights discovered across both projects that would be useful for anyone building with Arcade:
+
+| Learning | Detail |
+|----------|--------|
+| **Tool registration** | Use module-level `@tool` decorator. The `@app.tool` pattern inside `register_tools()` closures is NOT discoverable by `arcade mcp`. |
+| **`arcade mcp` arg order** | `-p package` comes BEFORE transport: `arcade mcp -p meow_me stdio` |
+| **OAuth scope limits** | Arcade's built-in providers support specific scopes only. Google: no `cloud-platform`. Slack: no `files:write`. Design for graceful degradation when scopes are unavailable. |
+| **Custom OAuth2 providers** | For unsupported scopes, register a custom provider: `OAuth2(id="my-provider", scopes=[...])`. Use `id` parameter (not `provider_id`). |
+| **STDIO for OAuth** | Tools with `requires_auth` can only run via STDIO transport, not HTTP. |
+| **`__init__.py` is the real entry point** | `arcade mcp` discovers tools by importing the package. It never executes `server.py`. Put `load_dotenv()` and patches in `__init__.py`. |
+| **ImageContent** | `arcade-mcp-server`'s `convert_to_mcp_content()` only returns `TextContent`. Monkey-patch to emit `ImageContent` for image-returning tools. |
+| **Windows encoding** | Set `PYTHONIOENCODING=utf-8` for subprocess calls. Arcade's output contains Unicode that Windows cp1252 can't render. |
+| **Claude Desktop paths** | Windows Store install uses `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\` for config. Use `--directory` flag in uv args. |
+| **Slack file upload API** | `files.completeUploadExternal` requires a channel ID (not name) and bot membership. `chat.postMessage` resolves names automatically -- this asymmetry is poorly documented. |
 
 ## Built With
 
 - [Arcade MCP Server](https://docs.arcade.dev) - MCP server framework with OAuth
+- [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) - Agent framework with function tools
+- [OpenAI gpt-image-1](https://platform.openai.com/docs/guides/image-generation) - Image-to-image generation
 - [Claude Code](https://claude.com/claude-code) - AI-assisted development (Claude Opus 4.6)
