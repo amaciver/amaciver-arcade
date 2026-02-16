@@ -25,6 +25,25 @@ uv run pytest -v
 uv run arcade mcp -p meow_me stdio
 ```
 
+## Using the Agent
+
+The CLI agent provides an interactive way to use the tools with natural language:
+
+```bash
+# Default: Arcade OAuth
+# - Text + avatars work
+# - Images saved locally (shows file path + ASCII preview)
+# - Text-only DMs to Slack
+uv run python -m meow_me
+
+# With direct bot token: full Slack integration
+# - Requires SLACK_BOT_TOKEN in .env and --slack flag
+# - Uploads images directly to Slack channels
+uv run python -m meow_me --slack
+```
+
+See [meow_me/README.md](meow_me/README.md) for full agent documentation, auth modes, and Slack setup.
+
 ## Development Journey
 
 This project was built across multiple sessions, each exploring different aspects of the Arcade platform. The learnings from each phase directly shaped the next.
@@ -49,7 +68,7 @@ Armed with Arcade platform knowledge from Sushi Scout, built a more ambitious pr
 - **OpenAI image generation** (gpt-image-1 image-to-image with avatar input)
 - **MCP ImageContent** (monkey-patched arcade-mcp-server to return image previews)
 - **An interactive LLM agent** (OpenAI Agents SDK with 7 tool wrappers, progress output, ASCII art preview)
-- **3-tier Slack auth** (session cache, direct bot token, Arcade OAuth with graceful degradation)
+- **Dual Slack auth modes**: `--slack` flag for bot token (full Slack integration incl. channel image uploads) or default Arcade OAuth (text + avatars, saves images locally with file path output)
 
 ## Key Learnings: Arcade Platform
 

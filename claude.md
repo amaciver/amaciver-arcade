@@ -41,7 +41,7 @@ Originality: Your toolkit is unique from existing Arcade AI toolkits, and your a
 ```
 Interactive Agent (OpenAI Agents SDK, gpt-4o-mini + 7 tool wrappers)
   │ @function_tool wrappers (includes save_image_locally, agent-only)
-  │ 3-tier Slack auth: cache → SLACK_BOT_TOKEN → Arcade OAuth
+  │ Dual Slack auth: --slack flag (bot token) or default (Arcade OAuth)
   │ Progress output + ASCII art preview
   ▼
 MCP Server (arcade-mcp-server, 6 tools)
@@ -59,10 +59,11 @@ MCP Server (arcade-mcp-server, 6 tools)
 - `meow_me`: `Slack(scopes=["chat:write", "im:write", "users:read"])` — falls back to text-only if files:write unavailable
 - `get_user_avatar`: `Slack(scopes=["users:read"])`
 - `send_cat_fact`: `Slack(scopes=["chat:write"])`
-- `send_cat_image`: `Slack(scopes=["chat:write"])` — tries file upload, falls back to text if files:write unavailable
+- `send_cat_image`: `Slack(scopes=["chat:write"])` — MCP tool requests only `chat:write`; file upload requires `files:write` at runtime (available with bot token, not Arcade OAuth)
 
-**CLI agent** uses 3-tier auth: cache → `SLACK_BOT_TOKEN` → Arcade OAuth
-- Arcade OAuth scopes: `chat:write`, `im:write`, `users:read` (NO `files:write` — Arcade limitation)
+**CLI agent** auth modes:
+- Default: session cache → Arcade OAuth (`chat:write`, `im:write`, `users:read` — NO `files:write`)
+- `--slack` flag: session cache → `SLACK_BOT_TOKEN` env var (all scopes incl. `files:write`)
 - `ARCADE_USER_ID` env var must match your Arcade account email
 
 ---
@@ -90,8 +91,14 @@ cd meow_me && uv run pytest -v
 # Demo mode (no API keys needed)
 uv run python -m meow_me --demo
 
-# Interactive agent (requires OPENAI_API_KEY in .env)
+# Interactive agent with Arcade OAuth
+# - Text + avatars work, images saved locally (file path shown + ASCII preview)
 uv run python -m meow_me
+
+# Interactive agent with bot token
+# - Full Slack integration: uploads images directly to channels
+# - Requires SLACK_BOT_TOKEN in .env
+uv run python -m meow_me --slack
 
 # MCP server (STDIO for Claude Desktop)
 uv run arcade mcp -p meow_me stdio
@@ -107,7 +114,7 @@ uv run arcade mcp -p meow_me http --debug
 ```bash
 # .env (gitignored)
 OPENAI_API_KEY=sk-...          # For agent LLM (gpt-4o-mini) AND image generation (gpt-image-1)
-SLACK_BOT_TOKEN=xoxb-...       # Optional: direct Slack auth (all features incl. image upload)
+SLACK_BOT_TOKEN=xoxb-...       # Optional: requires --slack flag; enables direct channel image uploads
 ARCADE_API_KEY=arc-...         # Optional: Arcade OAuth (text + avatars, no image upload)
 ARCADE_USER_ID=you@email.com   # Optional: skip email prompt during Arcade OAuth
 ```
