@@ -11,6 +11,7 @@ from meow_me.tools.slack import (
     _get_own_user_id,
     _open_dm_channel,
     _send_slack_message,
+    _resolve_channel_id,
     _get_upload_url,
     _upload_file_bytes,
     _complete_upload,
@@ -392,3 +393,105 @@ class TestCompleteUpload:
         assert payload["files"] == [{"id": "F123", "title": "Meow Art"}]
         assert payload["channel_id"] == "C456"
         assert payload["initial_comment"] == "A cat fact!"
+
+
+# --- Tests for _resolve_channel_id ---
+
+class TestResolveChannelId:
+    @pytest.mark.asyncio
+    async def test_passthrough_channel_id(self):
+        """Channel IDs starting with C/G/D are returned unchanged."""
+        result = await _resolve_channel_id("xoxb-token", "C01234567")
+        assert result == "C01234567"
+
+    @pytest.mark.asyncio
+    async def test_passthrough_group_id(self):
+        result = await _resolve_channel_id("xoxb-token", "G01234567")
+        assert result == "G01234567"
+
+    @pytest.mark.asyncio
+    async def test_passthrough_dm_id(self):
+        result = await _resolve_channel_id("xoxb-token", "D01234567")
+        assert result == "D01234567"
+
+    @pytest.mark.asyncio
+    async def test_resolves_channel_name(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "ok": True,
+            "channels": [
+                {"id": "C111", "name": "random"},
+                {"id": "C222", "name": "general"},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("meow_me.tools.slack.httpx.AsyncClient", return_value=mock_client):
+            result = await _resolve_channel_id("xoxb-token", "general")
+
+        assert result == "C222"
+
+    @pytest.mark.asyncio
+    async def test_resolves_hash_prefixed_name(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "ok": True,
+            "channels": [{"id": "C333", "name": "general"}],
+            "response_metadata": {"next_cursor": ""},
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("meow_me.tools.slack.httpx.AsyncClient", return_value=mock_client):
+            result = await _resolve_channel_id("xoxb-token", "#general")
+
+        assert result == "C333"
+
+    @pytest.mark.asyncio
+    async def test_raises_when_not_found(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "ok": True,
+            "channels": [{"id": "C111", "name": "random"}],
+            "response_metadata": {"next_cursor": ""},
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("meow_me.tools.slack.httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(RuntimeError, match="not found"):
+                await _resolve_channel_id("xoxb-token", "#nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_missing_scope_falls_back_to_raw_value(self):
+        """When channels:read scope is missing, returns the channel value as-is."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "ok": False,
+            "error": "missing_scope",
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("meow_me.tools.slack.httpx.AsyncClient", return_value=mock_client):
+            result = await _resolve_channel_id("xoxb-token", "#general")
+
+        assert result == "#general"

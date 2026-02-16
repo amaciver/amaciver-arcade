@@ -191,6 +191,58 @@ async def send_cat_fact(
     }
 
 
+async def _resolve_channel_id(token: str, channel: str) -> str:
+    """Resolve a channel name (e.g. '#general' or 'general') to a channel ID.
+
+    If the input already looks like a Slack channel ID (starts with C/G/D),
+    returns it unchanged. Requires the ``channels:read`` bot scope to look up
+    channel names; falls back to passing the raw value through if the scope is
+    missing (so channel IDs still work without the extra scope).
+    """
+    # Already a channel ID
+    if channel and channel[0] in ("C", "G", "D") and channel[1:].isalnum():
+        return channel
+
+    # Strip leading '#'
+    name = channel.lstrip("#")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            cursor = ""
+            while True:
+                params: dict = {"limit": "200", "types": "public_channel,private_channel"}
+                if cursor:
+                    params["cursor"] = cursor
+                response = await client.get(
+                    f"{SLACK_API_BASE}/conversations.list",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params=params,
+                )
+                response.raise_for_status()
+                data = response.json()
+                if not data.get("ok"):
+                    error = data.get("error", "unknown")
+                    if error == "missing_scope":
+                        # channels:read scope not available — fall back to raw value
+                        return channel
+                    raise RuntimeError(
+                        f"Slack conversations.list failed: {error}"
+                    )
+                for ch in data.get("channels", []):
+                    if ch.get("name") == name:
+                        return ch["id"]
+                cursor = data.get("response_metadata", {}).get("next_cursor", "")
+                if not cursor:
+                    break
+    except RuntimeError:
+        raise
+    except Exception:
+        # Network or other error — fall back to raw value
+        return channel
+
+    raise RuntimeError(f"Channel '{channel}' not found in workspace")
+
+
 async def _get_upload_url(token: str, filename: str, length: int) -> dict:
     """Get an external upload URL via files.getUploadURLExternal."""
     async with httpx.AsyncClient() as client:
@@ -222,7 +274,12 @@ async def _upload_file_bytes(upload_url: str, file_bytes: bytes) -> None:
 async def _complete_upload(
     token: str, file_id: str, channel: str, initial_comment: str
 ) -> dict:
-    """Complete the file upload via files.completeUploadExternal."""
+    """Complete the file upload via files.completeUploadExternal.
+
+    Resolves channel names (e.g. '#general') to channel IDs automatically,
+    since this API endpoint requires a channel ID.
+    """
+    channel_id = await _resolve_channel_id(token, channel)
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{SLACK_API_BASE}/files.completeUploadExternal",
@@ -232,7 +289,7 @@ async def _complete_upload(
             },
             json={
                 "files": [{"id": file_id, "title": "Meow Art"}],
-                "channel_id": channel,
+                "channel_id": channel_id,
                 "initial_comment": initial_comment,
             },
         )

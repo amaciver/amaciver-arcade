@@ -12,7 +12,11 @@ from meow_me.agent import (
     _detect_capabilities,
     _build_capability_prompt,
     _get_slack_token,
+    _get_target_user_id,
+    _match_users,
+    _resolve_human_user,
     _slack_token,
+    _slack_config,
     run_demo,
 )
 
@@ -185,6 +189,12 @@ class TestToolWrappers:
 # --- Capability detection ---
 
 class TestCapabilityDetection:
+    def setup_method(self):
+        _slack_config["use_direct_token"] = False
+
+    def teardown_method(self):
+        _slack_config["use_direct_token"] = False
+
     def test_detects_no_keys(self):
         with patch.dict("os.environ", {}, clear=True):
             caps = _detect_capabilities()
@@ -200,12 +210,20 @@ class TestCapabilityDetection:
         assert caps["slack"] is False
         assert caps["slack_available"] is False
 
-    def test_detects_slack_token(self):
+    def test_detects_slack_token_with_flag(self):
+        _slack_config["use_direct_token"] = True
         with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}, clear=True):
             caps = _detect_capabilities()
         assert caps["slack"] is True
         assert caps["openai"] is False
         assert caps["slack_available"] is True
+
+    def test_ignores_slack_token_without_flag(self):
+        _slack_config["use_direct_token"] = False
+        with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}, clear=True):
+            caps = _detect_capabilities()
+        assert caps["slack"] is False
+        assert caps["slack_available"] is False
 
     def test_detects_arcade_key(self):
         with patch.dict("os.environ", {"ARCADE_API_KEY": "arc-test"}, clear=True):
@@ -215,6 +233,7 @@ class TestCapabilityDetection:
         assert caps["slack_available"] is True
 
     def test_slack_available_with_both(self):
+        _slack_config["use_direct_token"] = True
         with patch.dict("os.environ", {
             "SLACK_BOT_TOKEN": "xoxb-test", "ARCADE_API_KEY": "arc-test"
         }, clear=True):
@@ -251,20 +270,32 @@ class TestCapabilityDetection:
 
 class TestGetSlackToken:
     def setup_method(self):
-        """Clear token cache before each test."""
+        """Clear token cache and config before each test."""
         _slack_token["token"] = ""
+        _slack_config["use_direct_token"] = False
+
+    def teardown_method(self):
+        _slack_config["use_direct_token"] = False
 
     def test_returns_cached_token(self):
         _slack_token["token"] = "xoxb-cached"
         assert _get_slack_token() == "xoxb-cached"
 
-    def test_returns_env_var_token(self):
+    def test_returns_env_var_token_with_flag(self):
+        _slack_config["use_direct_token"] = True
         with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-env"}, clear=True):
             token = _get_slack_token()
         assert token == "xoxb-env"
         assert _slack_token["token"] == "xoxb-env"
 
+    def test_ignores_env_var_token_without_flag(self):
+        with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-env"}, clear=True):
+            token = _get_slack_token()
+        # Without --slack flag, should skip SLACK_BOT_TOKEN and fall to Arcade/empty
+        assert token == ""
+
     def test_caches_env_var_token(self):
+        _slack_config["use_direct_token"] = True
         with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-env"}, clear=True):
             _get_slack_token()
         # Token should be cached even after env is restored
@@ -350,3 +381,135 @@ class TestGetSlackToken:
     def teardown_method(self):
         """Clean up token cache after each test."""
         _slack_token["token"] = ""
+
+
+# --- User resolution (--slack mode) ---
+
+# Sample workspace members for testing
+_SAMPLE_MEMBERS = [
+    {
+        "id": "U001",
+        "name": "andrew",
+        "deleted": False,
+        "is_bot": False,
+        "profile": {"display_name": "Andrew M", "real_name": "Andrew MacIver"},
+    },
+    {
+        "id": "U002",
+        "name": "jane",
+        "deleted": False,
+        "is_bot": False,
+        "profile": {"display_name": "Jane", "real_name": "Jane Doe"},
+    },
+    {
+        "id": "U003",
+        "name": "testbot",
+        "deleted": False,
+        "is_bot": True,
+        "profile": {"display_name": "Test Bot", "real_name": "Test Bot"},
+    },
+    {
+        "id": "U004",
+        "name": "deleted_user",
+        "deleted": True,
+        "is_bot": False,
+        "profile": {"display_name": "Gone", "real_name": "Deleted User"},
+    },
+    {
+        "id": "U005",
+        "name": "andy",
+        "deleted": False,
+        "is_bot": False,
+        "profile": {"display_name": "Andy", "real_name": "Andy Smith"},
+    },
+]
+
+
+class TestMatchUsers:
+    def _active_users(self):
+        """Return non-bot, non-deleted users (what _fetch_slack_users would return)."""
+        return [m for m in _SAMPLE_MEMBERS if not m.get("is_bot") and not m.get("deleted")]
+
+    def test_exact_name_match(self):
+        matches = _match_users(self._active_users(), "andrew")
+        assert len(matches) == 1
+        assert matches[0]["id"] == "U001"
+
+    def test_display_name_match(self):
+        matches = _match_users(self._active_users(), "Jane")
+        assert len(matches) == 1
+        assert matches[0]["id"] == "U002"
+
+    def test_case_insensitive(self):
+        matches = _match_users(self._active_users(), "ANDREW")
+        assert len(matches) == 1
+        assert matches[0]["id"] == "U001"
+
+    def test_strips_at_sign(self):
+        matches = _match_users(self._active_users(), "@jane")
+        assert len(matches) == 1
+        assert matches[0]["id"] == "U002"
+
+    def test_partial_match(self):
+        """'and' matches both 'andrew' and 'andy'."""
+        matches = _match_users(self._active_users(), "and")
+        ids = {m["id"] for m in matches}
+        assert "U001" in ids
+        assert "U005" in ids
+
+    def test_no_match(self):
+        matches = _match_users(self._active_users(), "nonexistent")
+        assert len(matches) == 0
+
+
+class TestGetTargetUserId:
+    def setup_method(self):
+        _slack_config.pop("target_user_id", None)
+
+    def teardown_method(self):
+        _slack_config.pop("target_user_id", None)
+
+    def test_returns_none_when_not_set(self):
+        assert _get_target_user_id() is None
+
+    def test_returns_cached_id(self):
+        _slack_config["target_user_id"] = "U12345"
+        assert _get_target_user_id() == "U12345"
+
+
+class TestResolveHumanUser:
+    def setup_method(self):
+        _slack_config.pop("target_user_id", None)
+        _slack_config.pop("target_display_name", None)
+
+    def teardown_method(self):
+        _slack_config.pop("target_user_id", None)
+        _slack_config.pop("target_display_name", None)
+
+    @pytest.mark.asyncio
+    async def test_single_match_resolves(self):
+        active = [m for m in _SAMPLE_MEMBERS if not m.get("is_bot") and not m.get("deleted")]
+        with patch("meow_me.agent._fetch_slack_users", new_callable=AsyncMock, return_value=active):
+            with patch("builtins.input", return_value="jane"):
+                result = await _resolve_human_user("xoxb-test")
+        assert result["user_id"] == "U002"
+        assert _slack_config["target_user_id"] == "U002"
+
+    @pytest.mark.asyncio
+    async def test_multiple_matches_user_picks(self):
+        active = [m for m in _SAMPLE_MEMBERS if not m.get("is_bot") and not m.get("deleted")]
+        # "and" matches andrew and andy; user picks #2 (andy)
+        with patch("meow_me.agent._fetch_slack_users", new_callable=AsyncMock, return_value=active):
+            with patch("builtins.input", side_effect=["and", "2"]):
+                result = await _resolve_human_user("xoxb-test")
+        assert result["user_id"] == "U005"
+        assert _slack_config["target_user_id"] == "U005"
+
+    @pytest.mark.asyncio
+    async def test_no_match_retries(self):
+        active = [m for m in _SAMPLE_MEMBERS if not m.get("is_bot") and not m.get("deleted")]
+        # First try fails, second succeeds
+        with patch("meow_me.agent._fetch_slack_users", new_callable=AsyncMock, return_value=active):
+            with patch("builtins.input", side_effect=["nobody", "jane"]):
+                result = await _resolve_human_user("xoxb-test")
+        assert result["user_id"] == "U002"

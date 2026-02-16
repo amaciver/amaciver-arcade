@@ -33,19 +33,24 @@ Walks through 4 scripted scenarios showing exactly what the agent does: one-shot
 ### 3. Run the interactive agent
 
 ```bash
-# Create .env with your keys
+# Create .env with your keys (see .env.example)
 cat > .env <<EOF
 OPENAI_API_KEY=sk-...
-# Option A: Direct Slack token (supports all features including image upload)
+# Option A: Direct Slack bot token (all features incl. image upload)
 SLACK_BOT_TOKEN=xoxb-...
 # Option B: Arcade OAuth (text messaging + avatars, no image upload)
 ARCADE_API_KEY=arc-...
 ARCADE_USER_ID=your-email@example.com
 EOF
 
-# Start the agent
+# Start the agent (Arcade OAuth for Slack)
 uv run python -m meow_me
+
+# Or with direct Slack bot token (--slack flag required to opt in)
+uv run python -m meow_me --slack
 ```
+
+> **`--slack` mode:** At startup, the agent prompts for your Slack username or display name and looks you up in the workspace. This is needed because a bot token's `auth.test` returns the bot's identity, not yours. The resolved user is cached for the session.
 
 The agent uses `gpt-4o-mini` to reason about which tools to call based on your input. Try:
 - `"Meow me!"` - one-shot: fetches fact + avatar + generates image + DMs you
@@ -242,9 +247,9 @@ The agent prints real-time progress during tool execution (`>> Fetching cat fact
 ## Environment Variables
 
 ```bash
-# .env (gitignored)
+# .env (gitignored) — see src/meow_me/.env.example
 OPENAI_API_KEY=sk-...          # For agent LLM (gpt-4o-mini) AND image generation (gpt-image-1)
-SLACK_BOT_TOKEN=xoxb-...       # Optional: direct Slack auth (supports ALL features incl. image upload)
+SLACK_BOT_TOKEN=xoxb-...       # Optional: direct Slack auth (requires --slack flag to activate)
 ARCADE_API_KEY=arc-...         # Optional: Arcade platform auth (Slack OAuth, text + avatars only)
 ARCADE_USER_ID=you@email.com   # Optional: skip the email prompt during Arcade OAuth
 ```
@@ -254,8 +259,12 @@ ARCADE_USER_ID=you@email.com   # Optional: skip the email prompt during Arcade O
 The CLI agent resolves Slack tokens using a 3-tier strategy:
 
 1. **Session cache** - reuses token within a session
-2. **`SLACK_BOT_TOKEN` env var** - direct token, supports all features including `files:write` for image uploads
+2. **`SLACK_BOT_TOKEN` env var** (only when `--slack` flag is passed) - direct token, supports all features including `files:write` for image uploads
 3. **Arcade OAuth** (`ARCADE_API_KEY`) - opens browser for Slack authorization. Supports `chat:write`, `im:write`, `users:read`. **Does NOT support `files:write`** (Arcade platform limitation), so image uploads to Slack are unavailable; images are saved locally + shown as ASCII art instead.
+
+> **Why `--slack`?** The `SLACK_BOT_TOKEN` is never auto-detected. You must explicitly opt in with `--slack` so the bot token is only used when you intend it.
+
+> **User resolution in `--slack` mode:** A bot token's `auth.test` returns the bot's identity, not yours. At startup, the agent prompts for your Slack username, looks you up via `users.list`, and caches your user ID for the session. This lets `get_user_avatar` and `meow_me` target the correct human user.
 
 The MCP server tools get Slack tokens via Arcade's built-in OAuth provider at runtime.
 

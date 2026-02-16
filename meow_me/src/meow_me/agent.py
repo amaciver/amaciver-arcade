@@ -3,6 +3,7 @@
 
 Usage:
     uv run python -m meow_me              # Interactive agent (requires OPENAI_API_KEY)
+    uv run python -m meow_me --slack      # Use SLACK_BOT_TOKEN from .env (all features)
     uv run python -m meow_me --demo       # Scripted demo (no API keys needed)
 
 For MCP server mode (used by Claude Desktop, Cursor, etc.):
@@ -115,10 +116,114 @@ def _image_to_ascii(image_bytes: bytes, width: int = 60) -> str:
     except Exception:
         return ""
 _slack_token: dict = {"token": ""}  # Session-level Slack token cache
+_slack_config: dict = {"use_direct_token": False}  # Set True by --slack CLI flag
 
 # Note: Arcade's Slack provider does NOT support files:write,
 # so image uploads only work with a direct SLACK_BOT_TOKEN.
 SLACK_SCOPES = ["chat:write", "im:write", "users:read"]
+
+
+def _get_target_user_id() -> str | None:
+    """Return the cached human user ID (--slack mode) or None (Arcade mode)."""
+    return _slack_config.get("target_user_id")
+
+
+async def _fetch_slack_users(token: str) -> list[dict]:
+    """Fetch all non-bot, non-deleted workspace members via users.list (paginated)."""
+    import httpx
+
+    users: list[dict] = []
+    cursor = ""
+    async with httpx.AsyncClient() as client:
+        while True:
+            params: dict = {"limit": "200"}
+            if cursor:
+                params["cursor"] = cursor
+            resp = await client.get(
+                "https://slack.com/api/users.list",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"Slack users.list failed: {data.get('error', 'unknown')}")
+            for member in data.get("members", []):
+                if member.get("is_bot") or member.get("deleted") or member.get("id") == "USLACKBOT":
+                    continue
+                users.append(member)
+            cursor = data.get("response_metadata", {}).get("next_cursor", "")
+            if not cursor:
+                break
+    return users
+
+
+def _match_users(users: list[dict], query: str) -> list[dict]:
+    """Find workspace members matching a query (case-insensitive).
+
+    Matches against name (handle), display_name, and real_name.
+    """
+    q = query.lower().lstrip("@")
+    matches = []
+    for user in users:
+        name = (user.get("name") or "").lower()
+        profile = user.get("profile", {})
+        display = (profile.get("display_name") or "").lower()
+        real = (profile.get("real_name") or "").lower()
+        if q in (name, display, real) or q in name or q in display or q in real:
+            matches.append(user)
+    return matches
+
+
+async def _resolve_human_user(token: str) -> dict:
+    """Prompt for Slack username, look up via users.list, cache the result.
+
+    Returns {"user_id": ..., "display_name": ...} and stores in _slack_config.
+    """
+    print("  Resolving your Slack identity...", flush=True)
+    users = await _fetch_slack_users(token)
+
+    for attempt in range(3):
+        query = input("  Enter your Slack username or display name: ").strip()
+        if not query:
+            print("  Please enter a name.", flush=True)
+            continue
+
+        matches = _match_users(users, query)
+
+        if len(matches) == 1:
+            user = matches[0]
+            profile = user.get("profile", {})
+            display = profile.get("display_name") or profile.get("real_name") or user.get("name", "")
+            _slack_config["target_user_id"] = user["id"]
+            _slack_config["target_display_name"] = display
+            return {"user_id": user["id"], "display_name": display}
+
+        if len(matches) > 1:
+            print(f"  Found {len(matches)} matches:", flush=True)
+            for i, user in enumerate(matches[:10], 1):
+                profile = user.get("profile", {})
+                display = profile.get("display_name") or profile.get("real_name") or ""
+                handle = user.get("name", "")
+                print(f"    {i}. @{handle} ({display}) [{user['id']}]", flush=True)
+            try:
+                choice = int(input("  Enter number: ").strip()) - 1
+                if 0 <= choice < len(matches[:10]):
+                    user = matches[choice]
+                    profile = user.get("profile", {})
+                    display = profile.get("display_name") or profile.get("real_name") or user.get("name", "")
+                    _slack_config["target_user_id"] = user["id"]
+                    _slack_config["target_display_name"] = display
+                    return {"user_id": user["id"], "display_name": display}
+            except (ValueError, EOFError):
+                pass
+            print("  Invalid selection, try again.", flush=True)
+            continue
+
+        print(f"  No users found matching '{query}'. Try again.", flush=True)
+
+    print("  Could not resolve Slack user after 3 attempts.", flush=True)
+    sys.exit(1)
 
 
 def _get_slack_token() -> str:
@@ -130,11 +235,12 @@ def _get_slack_token() -> str:
     if _slack_token["token"]:
         return _slack_token["token"]
 
-    # 2. Check env var
-    env_token = os.getenv("SLACK_BOT_TOKEN", "")
-    if env_token:
-        _slack_token["token"] = env_token
-        return env_token
+    # 2. Check env var (only when --slack flag was passed)
+    if _slack_config["use_direct_token"]:
+        env_token = os.getenv("SLACK_BOT_TOKEN", "")
+        if env_token:
+            _slack_token["token"] = env_token
+            return env_token
 
     # 3. Try Arcade OAuth (requires ARCADE_API_KEY)
     arcade_key = os.getenv("ARCADE_API_KEY", "")
@@ -266,7 +372,9 @@ def _build_tools():
             _extract_display_name,
         )
 
-        user_id = await _get_own_user_id(token)
+        # In --slack mode, use the resolved human user instead of auth.test (which returns the bot)
+        target = _get_target_user_id()
+        user_id = target if target else await _get_own_user_id(token)
         user_info = await _get_user_info(token, user_id)
         return json.dumps({
             "user_id": user_id,
@@ -337,17 +445,27 @@ def _build_tools():
             _get_upload_url,
             _upload_file_bytes,
             _complete_upload,
+            _send_slack_message,
         )
 
-        image_bytes = b64.b64decode(image_base64)
-        upload_info = await _get_upload_url(token, "meow_art.png", len(image_bytes))
-        await _upload_file_bytes(upload_info["upload_url"], image_bytes)
-        caption = _format_cat_fact_message(cat_fact)
-        await _complete_upload(token, upload_info["file_id"], channel, caption)
-        _progress("Image uploaded!")
-        return json.dumps({
-            "success": True, "channel": channel, "file_id": upload_info["file_id"],
-        })
+        try:
+            image_bytes = b64.b64decode(image_base64)
+            upload_info = await _get_upload_url(token, "meow_art.png", len(image_bytes))
+            await _upload_file_bytes(upload_info["upload_url"], image_bytes)
+            caption = _format_cat_fact_message(cat_fact)
+            await _complete_upload(token, upload_info["file_id"], channel, caption)
+            _progress("Image uploaded!")
+            return json.dumps({
+                "success": True, "channel": channel, "file_id": upload_info["file_id"],
+            })
+        except Exception as e:
+            _progress(f"Image upload failed ({e}), sending text instead...")
+            message = _format_cat_fact_message(cat_fact)
+            await _send_slack_message(token, channel, message)
+            return json.dumps({
+                "success": True, "channel": channel, "image_uploaded": False,
+                "fallback_reason": f"File upload failed ({e}), sent text-only fact instead.",
+            })
 
     @function_tool
     async def save_image_locally(image_base64: str = "__last__", cat_fact: str = "") -> str:
@@ -425,7 +543,9 @@ def _build_tools():
         from meow_me.tools.image import _download_avatar, _generate_image_openai, _compose_prompt
 
         _progress("Authenticating with Slack...")
-        user_id = await _get_own_user_id(token)
+        # In --slack mode, use the resolved human user instead of auth.test (which returns the bot)
+        target = _get_target_user_id()
+        user_id = target if target else await _get_own_user_id(token)
         _progress("Opening DM channel...")
         dm_channel = await _open_dm_channel(token, user_id)
         _progress("Fetching cat fact...")
@@ -437,8 +557,8 @@ def _build_tools():
 
         import base64 as b64
 
-        # Can we upload files? Only with direct SLACK_BOT_TOKEN (Arcade OAuth lacks files:write)
-        can_upload = bool(os.getenv("SLACK_BOT_TOKEN"))
+        # Can we upload files? Only with direct SLACK_BOT_TOKEN + --slack flag
+        can_upload = _slack_config["use_direct_token"] and bool(os.getenv("SLACK_BOT_TOKEN"))
 
         if os.getenv("OPENAI_API_KEY"):
             try:
@@ -482,10 +602,11 @@ def _build_tools():
             except Exception:
                 _progress("Image generation failed, falling back to text...")
 
-        # Send text fact to DM (always, as caption or standalone)
-        _progress("Sending text fact to DM...")
-        message = _format_cat_fact_message(fact)
-        await _send_slack_message(token, dm_channel, message)
+        # Send text fact to DM only if the image wasn't already sent with a caption
+        if not image_sent:
+            _progress("Sending text fact to DM...")
+            message = _format_cat_fact_message(fact)
+            await _send_slack_message(token, dm_channel, message)
 
         result = {
             "success": True, "fact": fact,
@@ -506,8 +627,8 @@ def _build_tools():
 
 
 def _detect_capabilities() -> dict:
-    """Detect which API capabilities are available based on env vars."""
-    has_slack_token = bool(os.getenv("SLACK_BOT_TOKEN"))
+    """Detect which API capabilities are available based on env vars and CLI flags."""
+    has_slack_token = _slack_config["use_direct_token"] and bool(os.getenv("SLACK_BOT_TOKEN"))
     has_arcade_key = bool(os.getenv("ARCADE_API_KEY"))
     return {
         "openai": bool(os.getenv("OPENAI_API_KEY")),
@@ -521,14 +642,14 @@ def _build_capability_prompt(caps: dict) -> str:
     """Build an addendum to the system prompt based on available capabilities."""
     lines = ["\nCURRENT SESSION CAPABILITIES:"]
     if caps.get("slack"):
-        lines.append("- Slack: CONNECTED (SLACK_BOT_TOKEN set)")
+        lines.append("- Slack: CONNECTED (SLACK_BOT_TOKEN via --slack flag)")
     elif caps.get("arcade"):
         lines.append("- Slack: AVAILABLE via Arcade OAuth (text messaging + avatars)")
         lines.append("  -> send_cat_fact, get_user_avatar, meow_me (text-only) work.")
         lines.append("  -> send_cat_image does NOT work (Arcade doesn't support files:write scope).")
         lines.append("  -> For images: generate_cat_image + save_image_locally (shows ASCII preview).")
     else:
-        lines.append("- Slack: NOT AVAILABLE (no SLACK_BOT_TOKEN or ARCADE_API_KEY)")
+        lines.append("- Slack: NOT AVAILABLE (use --slack flag or set ARCADE_API_KEY)")
         lines.append("  -> Do NOT call meow_me, send_cat_fact, send_cat_image, or get_user_avatar.")
         lines.append("  -> Instead: display facts in chat, generate images and save locally.")
     if caps.get("openai"):
@@ -556,7 +677,10 @@ async def run_agent() -> None:
 
     # Authenticate with Slack at startup (not lazily inside tools)
     if caps["slack"]:
-        print("  Slack:  connected (direct token)", flush=True)
+        print("  Slack:  connected (direct token via --slack)", flush=True)
+        # Resolve the human user (bot token's auth.test returns the bot, not you)
+        target = await _resolve_human_user(_get_slack_token())
+        print(f"  User:   {target['display_name']} ({target['user_id']})", flush=True)
     elif caps["arcade"]:
         print("  Slack:  connecting via Arcade OAuth...", flush=True)
         token = _get_slack_token()
@@ -567,7 +691,7 @@ async def run_agent() -> None:
             caps["slack_available"] = False
             print("  Slack:  auth failed (Slack tools disabled)", flush=True)
     else:
-        print("  Slack:  not connected (set SLACK_BOT_TOKEN or ARCADE_API_KEY)")
+        print("  Slack:  not connected (use --slack flag, or set ARCADE_API_KEY)")
     if caps["openai"]:
         print("  Images: enabled")
     else:
@@ -771,24 +895,38 @@ def main() -> None:
         action="store_true",
         help="Run scripted demo mode (no API keys needed)",
     )
+    parser.add_argument(
+        "--slack",
+        action="store_true",
+        help="Use SLACK_BOT_TOKEN from .env (enables all Slack features incl. image upload)",
+    )
 
     args = parser.parse_args()
 
     if args.demo:
         run_demo()
     elif os.getenv("OPENAI_API_KEY"):
+        if args.slack:
+            if not os.getenv("SLACK_BOT_TOKEN"):
+                print("\nError: --slack flag requires SLACK_BOT_TOKEN in .env")
+                print("See .env.example for setup instructions.\n")
+                sys.exit(1)
+            _slack_config["use_direct_token"] = True
         asyncio.run(run_agent())
     else:
         print()
         print("OPENAI_API_KEY not set. Options:")
         print()
         print("  1. Set OPENAI_API_KEY and run the interactive agent:")
-        print("     OPENAI_API_KEY=sk-... uv run python -m meow_me")
+        print("     uv run python -m meow_me")
         print()
-        print("  2. Run the scripted demo (no keys needed):")
+        print("  2. With Slack bot token (all features incl. image upload):")
+        print("     uv run python -m meow_me --slack")
+        print()
+        print("  3. Run the scripted demo (no keys needed):")
         print("     uv run python -m meow_me --demo")
         print()
-        print("  3. Run as MCP server (for Claude Desktop / Cursor):")
+        print("  4. Run as MCP server (for Claude Desktop / Cursor):")
         print("     uv run arcade mcp -p meow_me stdio")
         print()
         sys.exit(1)
