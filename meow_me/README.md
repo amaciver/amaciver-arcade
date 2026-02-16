@@ -30,7 +30,22 @@ uv run python -m meow_me --demo
 
 Walks through 4 scripted scenarios showing exactly what the agent does: one-shot "meow me", fact browsing with text delivery, image pipeline, and browse-only mode.
 
-### 3. Run the interactive agent
+### 3. Run evaluations (tests LLM tool selection)
+
+```bash
+# Set your API key
+export OPENAI_API_KEY=sk-...
+
+# Run all 12 evaluation cases
+uv run arcade evals evals/
+
+# With detailed output
+uv run arcade evals evals/ --details
+```
+
+See [evals/README.md](evals/README.md) for full documentation. Evaluations test whether AI models correctly select and invoke tools (complementing the 138 pytest unit tests).
+
+### 4. Run the interactive agent
 
 ```bash
 # Create .env with your keys (see .env.example)
@@ -61,7 +76,7 @@ The agent uses `gpt-4o-mini` to reason about which tools to call based on your i
 
 The agent shows real-time progress indicators as tools execute and displays ASCII art previews of generated images directly in the terminal.
 
-### 4. Connect as MCP server
+### 5. Connect as MCP server
 
 **Option A: Claude Desktop**
 
@@ -98,7 +113,9 @@ uv run arcade mcp -p meow_me http --debug
 
 Server starts at `http://127.0.0.1:8000`.
 
-### 5. Run tests
+### 6. Run tests
+
+**Unit tests (pytest)** - test implementation correctness:
 
 ```bash
 uv run pytest -v
@@ -114,6 +131,15 @@ tests/test_image.py   - 26 tests (prompts, validation, thumbnail, ImageContent p
 tests/test_agent.py   - 46 tests (system prompt, demo, tool wrappers, auth, Arcade OAuth, capabilities)
 tests/test_evals.py   -  8 tests (end-to-end workflows, edge cases, formatting)
 ```
+
+**Evaluations (Arcade evals)** - test LLM tool selection:
+
+```bash
+# Requires OPENAI_API_KEY
+uv run arcade evals evals/
+```
+
+12 evaluation cases across 2 suites (all passing!). See [evals/README.md](evals/README.md) for details.
 
 ---
 

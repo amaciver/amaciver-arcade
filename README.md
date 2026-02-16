@@ -4,7 +4,7 @@ An MCP server toolkit and LLM-powered agent built with [Arcade.dev](https://arca
 
 ## The Project: [Meow Art (meow_me)](meow_me/)
 
-MCP server (6 tools, 138 tests) + interactive CLI agent that fetches random cat facts, retrieves your Slack avatar, generates stylized cat-themed art via OpenAI's gpt-image-1, and sends the results to Slack. Supports both Arcade's built-in Slack OAuth and direct bot tokens.
+MCP server (6 tools, 138 unit tests, 12 evals) + interactive CLI agent that fetches random cat facts, retrieves your Slack avatar, generates stylized cat-themed art via OpenAI's gpt-image-1, and sends the results to Slack. Supports both Arcade's built-in Slack OAuth and direct bot tokens.
 
 See [meow_me/README.md](meow_me/README.md) for full documentation, architecture, and setup instructions.
 
@@ -18,8 +18,11 @@ uv sync --all-extras
 # Try the demo (no API keys needed)
 uv run python -m meow_me --demo
 
-# Run all 138 tests
+# Run all 138 unit tests
 uv run pytest -v
+
+# Run 12 LLM evaluation cases (requires OPENAI_API_KEY)
+uv run arcade evals evals/
 
 # Start as MCP server (for Claude Desktop / Cursor)
 uv run arcade mcp -p meow_me stdio

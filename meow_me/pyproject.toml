@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "arcade-mcp[all]>=1.9.0,<2.0.0",
+    "arcade-mcp[all,evals]>=1.9.0,<2.0.0",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "mypy>=1.0.0",
