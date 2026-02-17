@@ -323,7 +323,7 @@ The MCP server tools get Slack tokens via Arcade's built-in OAuth provider at ru
 - **Image generation time**: `gpt-image-1` takes 30-60 seconds per image. The agent shows a progress indicator while generating.
 - **`send_cat_image` requires `SLACK_BOT_TOKEN`**: Since Arcade OAuth can't grant `files:write`, image uploads to Slack channels only work with a direct bot token.
 - **Claude Desktop image preview**: Generated images appear in Claude Desktop's tool results (as compressed JPEG thumbnails via MCP `ImageContent`), but are not displayed inline in the conversation. The full-res PNG is stored server-side and can be sent to Slack via `send_cat_image`.
-- **arcade-mcp-server ImageContent**: The framework's `convert_to_mcp_content()` only returns `TextContent`. We monkey-patch it at import time in `__init__.py` to also emit `ImageContent` blocks when tools include a `_mcp_image` key in their return dict.
+- **arcade-mcp-server ImageContent**: Arcade `@tool` functions must return dicts (per their typed schemas). The framework's `convert_to_mcp_content()` converts these dicts to MCP content blocks, but by default only emits `TextContent`. We monkey-patch it at import time in `__init__.py` to detect a special `_mcp_image` key and also emit `ImageContent` blocks, enabling inline image previews in Claude Desktop.
 
 ---
 
@@ -401,9 +401,11 @@ The MCP server tools use Arcade's **built-in Slack OAuth provider** - no manual 
 | Count limits | get_cat_fact: 1-5, send_cat_fact: 1-3 | Prevent spam while allowing batch sends |
 | Server-side image stash | `_last_generated_image` dict | Avoids sending ~2MB base64 through LLM context; tools reference via `"__last__"` |
 | Thumbnail compression | 512x512 JPEG at 80% quality | Claude Desktop has ~1MB MCP content limit; thumbnail is ~50-100KB |
-| ImageContent monkey-patch | Patch `convert_to_mcp_content` | arcade-mcp-server only returns TextContent; MCP spec supports ImageContent |
+| ImageContent monkey-patch | Patch `convert_to_mcp_content` | Arcade tools must return dicts; patch extends framework to emit ImageContent from dict values |
 | `__init__.py` initialization | `load_dotenv()` + patch in `__init__.py` | `arcade mcp` never executes `server.py`; `__init__.py` runs for any import |
 | Input validation | Error messages reference prerequisite tools | Guides the LLM to call `get_user_avatar`/`get_cat_fact` before `generate_cat_image` |
+
+> **MCP Tools vs Resources for Images:** We use **tools** (not resources) because our use case requires LLM-controlled orchestration, inline previews, and single-operation generation. Resources would require URI-based retrieval and fit better for pre-existing image galleries. See [DEVELOPMENT_NOTES.md](DEVELOPMENT_NOTES.md#mcp-architecture-tools-vs-resources-for-images) for full comparison. **2026 Update:** [MCP Apps](http://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/) now enable tools to return interactive UI components beyond static images.
 
 ---
 

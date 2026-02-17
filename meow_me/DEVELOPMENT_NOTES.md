@@ -236,7 +236,7 @@ Get `generate_cat_image` working end-to-end in Claude Desktop (MCP client), incl
 
 3. **Images too large for Claude Desktop (~2MB PNGs)**: Full 1024x1024 PNG from `gpt-image-1` is ~2MB base64 (~2.7MB). Claude Desktop has a ~1MB limit on MCP tool result content. Fix: added `_make_preview_thumbnail()` using Pillow — resizes to 512x512 JPEG at 80% quality (~50-100KB).
 
-4. **arcade-mcp-server only returns TextContent**: `convert_to_mcp_content()` in arcade-mcp-server always returns `TextContent`, even though the MCP spec (and arcade's own `ImageContent` type) supports images in tool results. Fix: monkey-patch `convert_to_mcp_content` in `__init__.py` to detect `_mcp_image` key in return dicts and emit an `ImageContent` block alongside the `TextContent`.
+4. **Arcade tools must return dicts, but we need ImageContent in MCP output**: Arcade `@tool` decorated functions have typed return schemas that require dicts. arcade-mcp-server's `convert_to_mcp_content()` converts these dicts to MCP content blocks, but by default only emits `TextContent`. To enable inline image previews in Claude Desktop, we monkey-patch `convert_to_mcp_content` in `__init__.py` to detect a special `_mcp_image` key in tool return dicts and emit an `ImageContent` block alongside the `TextContent`. This extends the framework to support our use case: returning structured data (dict) plus an image preview (ImageContent) from a single tool call.
 
 5. **`logging.basicConfig` silently ignored**: Arcade configures the root logger before our `__init__.py` runs, making `basicConfig()` a no-op. Debug log file was never created. Fix: added `force=True` parameter and file-based trace writes that bypass the logging framework entirely.
 
@@ -450,6 +450,8 @@ meow_me/evals/
 
 26. **`arcade-ai[evals]` vs `arcade-mcp[evals]`**: The older `arcade-ai[evals]` package is incompatible with current arcade-mcp-server versions. Use `arcade-mcp[all,evals]` for MCP-based evaluations.
 
+27. **ImageContent monkey-patch is necessary**: Arcade `@tool` decorated functions have typed return schemas that require returning dicts (not raw MCP content blocks). Tools cannot return `[TextContent(...), ImageContent(...)]` directly — attempting this causes validation errors: `Input should be a valid dictionary [type=dict_type, input_value=[TextContent(...)]]`. The monkey patch intercepts the dict-to-MCP conversion to emit ImageContent alongside TextContent, which is the only way to return structured data (dict) plus image previews from Arcade tools.
+
 ### Test Coverage (Session 6)
 
 **Pytest (138 unit tests):**
@@ -512,4 +514,48 @@ uv run arcade evals evals/ --capture -o results.json
 # Specific provider/model
 uv run arcade evals evals/ --use-provider openai:gpt-4o-mini
 ```
+
+---
+
+## MCP Architecture: Tools vs Resources for Images
+
+### Design Choice: Why Tools (not Resources)?
+
+MCP offers two patterns for exposing data to LLM clients:
+
+| Pattern | **Tools** (our choice) | **Resources** (alternative) |
+|---------|----------------------|----------------------------|
+| **Control** | Model-controlled (LLM decides when to invoke) | Application-driven (client/user retrieves) |
+| **Purpose** | Dynamic operations, computations | Passive data access (like REST endpoints) |
+| **URIs** | No URI scheme | URI-addressable (e.g., `image://generated/abc123`) |
+| **Image support** | ✅ Full support via ImageContent | ⚠️ Inconsistent in Python SDK ([Issue #1026](https://github.com/modelcontextprotocol/python-sdk/issues/1026)) |
+
+**For our use case, tools are the right choice:**
+
+1. **LLM orchestration** - Claude decides *when* to generate images (e.g., as part of "Meow me!" workflow)
+2. **Inline previews** - ImageContent appears directly in tool results without additional client retrieval
+3. **Single operation** - Generate + return in one call (resources would require generate → store → client fetch)
+4. **Stateless design** - No image persistence layer or ID management required
+
+**Resources would make sense for:**
+- Pre-existing images users can browse (e.g., `camera://frame/latest`, `file:///path/to/gallery/image.png`)
+- Image galleries with stable URIs
+- Scenarios where the *application* (not LLM) controls when to fetch images
+
+### 2026 MCP Development: Interactive UI Beyond Images
+
+**[MCP Apps](http://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)** (announced Jan 26, 2026) extends what tools can return beyond static images:
+
+- Tools can now return **interactive UI components** that render directly in the conversation
+- Dashboards, forms, visualizations, multi-step workflows
+- Renders in sandboxed iframe with bidirectional communication
+- First official MCP extension, production-ready
+
+This represents the future direction for rich tool outputs. Our ImageContent approach (static JPEG thumbnails) could evolve to return interactive image viewers, editing tools, or galleries using MCP Apps.
+
+**References:**
+- [MCP Tools Specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+- [MCP Resources vs Tools Explained](https://medium.com/@laurentkubaski/mcp-resources-explained-and-how-they-differ-from-mcp-tools-096f9d15f767)
+- [MCP Apps Blog Post](http://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)
+- [Python SDK Image Issue #1026](https://github.com/modelcontextprotocol/python-sdk/issues/1026)
 

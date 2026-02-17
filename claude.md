@@ -143,9 +143,10 @@ This matters for:
     - Set `.name = "avatar.png"` on BytesIO objects
 
 12. **ImageContent monkey-patch:**
-    - `arcade-mcp-server` only returns `TextContent`
-    - Patched `convert_to_mcp_content()` in `__init__.py` to emit `ImageContent`
-    - Tools return `_mcp_image` key with JPEG thumbnail data
+    - Arcade `@tool` functions must return dicts (per typed schemas)
+    - `convert_to_mcp_content()` converts dicts to MCP content (default: TextContent only)
+    - Patched in `__init__.py` to detect `_mcp_image` key and emit ImageContent
+    - Enables inline image previews in Claude Desktop from dict-returning tools
 
 ### Windows-Specific
 

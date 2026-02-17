@@ -77,7 +77,7 @@ The code is preserved in the [archive repo](https://github.com/amaciver/amaciver
 Armed with Arcade platform knowledge from Sushi Scout, built a more ambitious project combining:
 - **Arcade's built-in Slack OAuth** (vs custom provider in Sushi Scout)
 - **OpenAI image generation** (gpt-image-1 image-to-image with avatar input)
-- **MCP ImageContent** (monkey-patched arcade-mcp-server to return image previews)
+- **MCP ImageContent** (extended arcade-mcp-server's dict-to-content conversion to emit image previews)
 - **An interactive LLM agent** (OpenAI Agents SDK with 7 tool wrappers, progress output, ASCII art preview)
 - **Dual Slack auth modes**: `--slack` flag for bot token (full Slack integration incl. channel image uploads) or default Arcade OAuth (text + avatars, saves images locally with file path output)
 
@@ -93,7 +93,7 @@ Insights discovered across both projects that would be useful for anyone buildin
 | **Custom OAuth2 providers** | For unsupported scopes, register a custom provider: `OAuth2(id="my-provider", scopes=[...])`. Use `id` parameter (not `provider_id`). |
 | **STDIO for OAuth** | Tools with `requires_auth` can only run via STDIO transport, not HTTP. |
 | **`__init__.py` is the real entry point** | `arcade mcp` discovers tools by importing the package. It never executes `server.py`. Put `load_dotenv()` and patches in `__init__.py`. |
-| **ImageContent** | `arcade-mcp-server`'s `convert_to_mcp_content()` only returns `TextContent`. Monkey-patch to emit `ImageContent` for image-returning tools. |
+| **ImageContent** | Arcade tools must return dicts (per typed schemas). Monkey-patch `convert_to_mcp_content()` to detect `_mcp_image` key and emit `ImageContent` alongside `TextContent`. |
 | **Windows encoding** | Set `PYTHONIOENCODING=utf-8` for subprocess calls. Arcade's output contains Unicode that Windows cp1252 can't render. |
 | **Claude Desktop paths** | Windows Store install uses `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\` for config. Use `--directory` flag in uv args. |
 | **Slack file upload API** | `files.completeUploadExternal` requires a channel ID (not name) and bot membership. `chat.postMessage` resolves names automatically -- this asymmetry is poorly documented. |

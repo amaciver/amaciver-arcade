@@ -26,10 +26,12 @@ if _log_path:
 # ---------------------------------------------------------------------------
 # Monkey-patch arcade-mcp-server to support MCP ImageContent in tool results.
 #
-# arcade-mcp-server's convert_to_mcp_content() always returns TextContent,
-# even though the MCP spec (and arcade's own types) support ImageContent.
-# We patch it so tools can include `_mcp_image: {data, mimeType}` in their
-# return dict and have it rendered inline in Claude Desktop.
+# Arcade @tool decorated functions must return dicts (per their typed schemas).
+# arcade-mcp-server's convert_to_mcp_content() converts these dicts to MCP
+# content, but by default only emits TextContent. We patch it to detect a
+# special `_mcp_image: {data, mimeType}` key in tool return dicts and emit
+# an ImageContent block alongside the TextContent, enabling inline image
+# previews in Claude Desktop.
 # ---------------------------------------------------------------------------
 def _install_image_content_patch() -> None:
     """Patch convert_to_mcp_content to emit ImageContent for _mcp_image keys."""
