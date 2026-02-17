@@ -85,18 +85,18 @@ Armed with Arcade platform knowledge from Sushi Scout, built a more ambitious pr
 
 Insights discovered across both projects that would be useful for anyone building with Arcade:
 
-| Learning | Detail |
-|----------|--------|
-| **Tool registration** | Use module-level `@tool` decorator. The `@app.tool` pattern inside `register_tools()` closures is NOT discoverable by `arcade mcp`. |
-| **`arcade mcp` arg order** | `-p package` comes BEFORE transport: `arcade mcp -p meow_me stdio` |
-| **OAuth scope limits** | Arcade's built-in providers support specific scopes only. Google: no `cloud-platform`. Slack: no `files:write`. Design for graceful degradation when scopes are unavailable. |
-| **Custom OAuth2 providers** | For unsupported scopes, register a custom provider: `OAuth2(id="my-provider", scopes=[...])`. Use `id` parameter (not `provider_id`). |
-| **STDIO for OAuth** | Tools with `requires_auth` can only run via STDIO transport, not HTTP. |
-| **`__init__.py` is the real entry point** | `arcade mcp` discovers tools by importing the package. It never executes `server.py`. Put `load_dotenv()` and patches in `__init__.py`. |
-| **ImageContent** | Arcade tools must return dicts (per typed schemas). Monkey-patch `convert_to_mcp_content()` to detect `_mcp_image` key and emit `ImageContent` alongside `TextContent`. |
-| **Windows encoding** | Set `PYTHONIOENCODING=utf-8` for subprocess calls. Arcade's output contains Unicode that Windows cp1252 can't render. |
-| **Claude Desktop paths** | Windows Store install uses `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\` for config. Use `--directory` flag in uv args. |
-| **Slack file upload API** | `files.completeUploadExternal` requires a channel ID (not name) and bot membership. `chat.postMessage` resolves names automatically -- this asymmetry is poorly documented. |
+| Learning | Detail | Reference |
+|----------|--------|-----------|
+| **Tool registration** | Use module-level `@tool` decorator. The `@app.tool` pattern inside `register_tools()` closures is NOT discoverable by `arcade mcp`. | [Organize MCP Tools](https://docs.arcade.dev/en/guides/create-tools/tool-basics/organize-mcp-tools) |
+| **`arcade mcp` arg order** | `-p package` comes BEFORE transport: `arcade mcp -p meow_me stdio` | [Arcade Docs](https://docs.arcade.dev/en/home) |
+| **OAuth scope limits** | Arcade's built-in providers support specific scopes only. Google: no `cloud-platform`. Slack: no `files:write`. Design for graceful degradation when scopes are unavailable. | [Slack Auth Provider](https://docs.arcade.dev/home/auth-providers/slack) |
+| **Custom OAuth2 providers** | For unsupported scopes, register a custom provider: `OAuth2(id="my-provider", scopes=[...])`. Use `id` parameter (not `provider_id`). | [OAuth2 Provider](https://docs.arcade.dev/en/home/auth-providers/oauth2) |
+| **STDIO for OAuth** | Tools with `requires_auth` can only run via STDIO transport, not HTTP. | [MCP Authorization](https://modelcontextprotocol.info/specification/draft/basic/authorization/) |
+| **`__init__.py` is the real entry point** | `arcade mcp` discovers tools by importing the package. It never executes `server.py`. Put `load_dotenv()` and patches in `__init__.py`. | [Organize MCP Tools](https://docs.arcade.dev/en/guides/create-tools/tool-basics/organize-mcp-tools) |
+| **ImageContent** | Arcade tools must return dicts (per typed schemas). Monkey-patch `convert_to_mcp_content()` to detect `_mcp_image` key and emit `ImageContent` alongside `TextContent`. | [MCP Tools Spec](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) |
+| **Windows encoding** | Set `PYTHONIOENCODING=utf-8` for subprocess calls. Arcade's output contains Unicode that Windows cp1252 can't render. | *Project-specific* |
+| **Claude Desktop paths** | Windows Store install uses `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\` for config. Use `--directory` flag in uv args. | *Project-specific* |
+| **Slack file upload API** | `files.completeUploadExternal` requires a channel ID (not name) and bot membership. `chat.postMessage` resolves names automatically -- this asymmetry is poorly documented. | [Slack API: files.completeUploadExternal](https://docs.slack.dev/reference/methods/files.completeUploadExternal/) |
 
 ## Built With
 
