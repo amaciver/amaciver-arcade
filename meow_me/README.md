@@ -67,6 +67,14 @@ uv run python -m meow_me
 uv run python -m meow_me --slack
 ```
 
+**Examples:**
+
+![Default mode (Arcade OAuth)](examples/meow-me-cli-example.gif)
+*Default mode: Images saved locally with ASCII preview*
+
+![--slack mode (Bot Token)](examples/meow-me-slack-example.gif)
+*--slack mode: Direct channel image uploads*
+
 > **`--slack` mode:** At startup, the agent prompts for your Slack username or display name and looks you up in the workspace. This is needed because a bot token's `auth.test` returns the bot's identity, not yours. The resolved user is cached for the session.
 
 The agent uses `gpt-4o-mini` to reason about which tools to call based on your input. Try:

@@ -32,13 +32,21 @@ uv run arcade mcp -p meow_me stdio
 
 The CLI agent provides an interactive way to use the tools with natural language:
 
+### Default Mode: Arcade OAuth
+![CLI Agent with Arcade OAuth](meow_me/examples/meow-me-cli-example.gif)
+
 ```bash
 # Default: Arcade OAuth
 # - Text + avatars work
 # - Images saved locally (shows file path + ASCII preview)
 # - Text-only DMs to Slack
 uv run python -m meow_me
+```
 
+### Bot Token Mode: Full Slack Integration
+![CLI Agent with Slack Bot Token](meow_me/examples/meow-me-slack-example.gif)
+
+```bash
 # With direct bot token: full Slack integration
 # - Requires SLACK_BOT_TOKEN in .env and --slack flag
 # - Uploads images directly to Slack channels
