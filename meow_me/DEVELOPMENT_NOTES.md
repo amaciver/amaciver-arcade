@@ -559,3 +559,246 @@ This represents the future direction for rich tool outputs. Our ImageContent app
 - [MCP Apps Blog Post](http://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)
 - [Python SDK Image Issue #1026](https://github.com/modelcontextprotocol/python-sdk/issues/1026)
 
+---
+
+## Session 7: Agent-Tool Separation via Arcade Cloud Deployment
+
+### Objective
+
+Address reviewer feedback identifying two structural issues with the project:
+
+1. **"You didn't really separate the agent and tools."** — The agent reimplemented tool logic locally via 7 `@function_tool` wrappers (~340 lines). Agent and tools ran in the same process with shared state (image stash, token cache). The reviewer specifically said: *"Try and arcade deploy your tools and then connect to them remotely (via MCP or the Arcade SDKs)."*
+
+2. **"It's not entirely clear if you made an agent, or deterministic software that happens to use an agentic tool."** — With all the orchestration logic baked into the wrappers, the agent looked like deterministic pipeline code rather than a thin LLM client.
+
+### Pre-Refactor Baseline
+
+**Commit `7a88607`** represents the fully-working state prior to this refactor: all 138 unit tests passing, all 12 evaluations passing, both `--slack` and default Arcade OAuth modes working end-to-end including image generation, Slack upload, and ASCII preview. This commit can be checked out to see the monolithic architecture where agent and tools coexisted in the same process.
+
+### Approach: Arcade SDK + `agents-arcade`
+
+Used the [`openai-agents-arcade`](https://github.com/ArcadeAI/openai-agents-arcade) library which provides `get_arcade_tools()` — converts Arcade-hosted tools into OpenAI Agents-compatible `FunctionTool` instances.
+
+**Architecture before (monolithic):**
+```
+agent.py (940 lines)
+  ├── 7 @function_tool wrappers (reimplemented tool logic)
+  ├── _last_generated_image dict (shared state)
+  ├── _slack_token cache + 3-tier auth
+  ├── Direct imports from meow_me.tools.*
+  └── Tools run in-process
+```
+
+**Architecture after (separated):**
+```
+agent.py (538 lines)               Arcade Cloud (deployed tools)
+  ├── AsyncArcade() client           MeowMe_GetCatFact
+  ├── get_arcade_tools(client)  →    MeowMe_GetUserAvatar
+  ├── Agent(tools=arcade_tools)      MeowMe_GenerateCatImage
+  ├── Runner.run(agent, input)       MeowMe_MeowMe
+  ├── ZERO imports from tools/*      MeowMe_SendCatFact
+  └── ZERO tool logic                MeowMe_SendCatImage
+                                     MeowMe_SaveImageLocally
+```
+
+### Implementation Steps
+
+#### Step 1: Explicit tool registration for `arcade deploy`
+
+`arcade deploy` requires tools to be registered on the `MCPApp` instance via `app.add_tool()`. The existing `server.py` relied on implicit discovery via module imports, which works for `arcade mcp` but not `arcade deploy`.
+
+**Changed `server.py`:** Added explicit `app.add_tool()` calls for all 7 tools after importing them. Verified all 7 register successfully via DEBUG logs.
+
+#### Step 2: Deploy tools to Arcade Cloud
+
+```bash
+cd meow_me
+PYTHONIOENCODING=utf-8 uv run arcade deploy -e src/meow_me/server.py \
+    --skip-validate --server-name meow_me --server-version 0.1.0 --secrets all
+```
+
+**Windows-specific issues encountered:**
+- `cp1252` encoding failure with Arcade's Unicode CLI output → `PYTHONIOENCODING=utf-8`
+- Local `/mcp` endpoint validation timeout → `--skip-validate` (requires explicit `--server-name` and `--server-version`)
+- Interactive `View full deployment logs? [y/n]` prompt hits EOF in non-interactive mode (benign — deploy still succeeds)
+
+#### Step 3: Add `agents-arcade` dependency
+
+Added `agents-arcade>=0.1.0` to `pyproject.toml` dependencies.
+
+#### Step 4: Rewrite `agent.py` — the main refactor
+
+**Deleted (~400 lines):**
+- `_last_generated_image` dict (agent-side image stash)
+- `_progress()` helper
+- `_slack_token` dict and `_get_slack_token()` function
+- Entire `_build_tools()` function with all 7 `@function_tool` wrappers
+
+**Kept:**
+- `SYSTEM_PROMPT` (updated tool names to MCP-namespaced `MeowMe_*`)
+- `_image_to_ascii()` (for local ASCII preview in demo mode)
+- `_detect_capabilities()` and `_build_capability_prompt()`
+- `run_demo()` (unchanged)
+- `main()` entry point
+- `--slack` mode support (user resolution logic)
+
+**New `run_agent()` function (~50 lines):**
+```python
+async def run_agent() -> None:
+    client = AsyncArcade()
+    tools = await get_arcade_tools(client, toolkits=["MeowMe"])
+    agent = Agent(name="Meow Art", model="gpt-4o-mini", tools=tools)
+    # Interactive loop: Runner.run() → result.to_input_list()
+```
+
+**Result:** `agent.py` shrunk from ~940 to ~538 lines. The remaining lines are system prompt, demo mode, `--slack` user resolution, and capability detection — zero tool logic.
+
+#### Step 5: Promote `save_image_locally` to MCP tool
+
+Previously existed only as a wrapper in `agent.py`. Moved to `tools/image.py` as a proper `@tool` so it deploys with the rest. Has access to `_last_generated_image` stash in the same MCP server process.
+
+#### Step 6: Token env var fallback for `--slack` mode
+
+MCP tools on Arcade Cloud receive auth tokens via `context.authorization.token` (Arcade OAuth). For `--slack` mode, the agent sets `SLACK_BOT_TOKEN` as an env var, and tools fall back to `os.getenv("SLACK_BOT_TOKEN")` when the Arcade context token is empty.
+
+**Added `_get_token(context)` helper** to `slack.py` and `avatar.py`:
+```python
+def _get_token(context: Context) -> str:
+    token = context.get_auth_token_or_empty()
+    if not token:
+        token = os.getenv("SLACK_BOT_TOKEN", "")
+    return token
+```
+
+#### Step 7: Arcade Cloud secrets — `context.get_secret()` + `requires_secrets`
+
+**Root cause of image generation failure on Arcade Cloud:** Tools used `os.getenv("OPENAI_API_KEY")` which returns nothing on Arcade Cloud — deployed secrets are NOT injected as environment variables. They must be accessed via `context.get_secret("KEY")`.
+
+**Critical discovery:** `context.get_secret()` only finds secrets that are declared in the tool's `requires_secrets` decorator attribute. Without this declaration, the Arcade Engine doesn't populate the secret in the tool's context, even if the secret is uploaded to the platform.
+
+**The chain:**
+1. `@tool(requires_secrets=["OPENAI_API_KEY"])` — declares the requirement
+2. Tool discovery registers `ToolSecretRequirement` in the tool definition
+3. Arcade Engine reads requirements and injects matching secrets into `ToolCallRequest.context.secrets`
+4. `context.get_secret("OPENAI_API_KEY")` finds the secret
+
+**Changed `image.py`:**
+```python
+@tool(requires_secrets=["OPENAI_API_KEY"])
+async def generate_cat_image(context: Context, ...):
+    try:
+        openai_key = context.get_secret("OPENAI_API_KEY")
+    except Exception:
+        openai_key = os.getenv("OPENAI_API_KEY", "")  # Local fallback
+```
+
+**Changed `slack.py`:** Same pattern for `meow_me` tool which also uses OpenAI for image generation.
+
+#### Step 8: Update tests
+
+**`test_agent.py`** (46 → 31 tests):
+- Deleted all `@function_tool` wrapper tests (no longer exist)
+- Deleted `TestGetSlackToken` tests (agent no longer manages tokens)
+- Updated system prompt tests for MCP-namespaced tool names
+- Kept demo mode, capability detection, `--slack` user resolution tests
+- Added Arcade SDK integration tests (mock `get_arcade_tools()`)
+
+**`test_image.py`** (26 → 31 tests):
+- Added `_mock_context(secrets)` helper for creating mock `Context` objects
+- All `generate_cat_image` calls now pass `context=ctx`
+- Tests with API key: `_mock_context({"OPENAI_API_KEY": "sk-test"})`
+- Tests without API key: `_mock_context()` + `patch.dict("os.environ", {}, clear=True)` to prevent local env fallback
+- Added `TestSaveImageLocally` (5 tests) for the new MCP tool
+
+### Debugging Journey
+
+| Symptom | Root Cause | Fix |
+|---------|-----------|-----|
+| `get_arcade_tools()` returns 0 tools | Toolkit name is `MeowMe` (PascalCase), not `meow_me` | `toolkits=["MeowMe"]` |
+| 503 error on first tool call | Server still installing dependencies on Arcade Cloud | Wait ~60 seconds after deploy |
+| `OPENAI_API_KEY not set` on cloud | `os.getenv()` doesn't find deployed secrets | Use `context.get_secret()` |
+| `context.get_secret()` raises ValueError | No `requires_secrets` on `@tool` decorator | Add `requires_secrets=["OPENAI_API_KEY"]` |
+| Secrets not bound after deploy | `--skip-validate` defaults `--secrets` to `skip` | Explicitly pass `--secrets all` |
+| `test_error_when_no_api_key` finds real key | `os.getenv` fallback reads local env | `patch.dict("os.environ", {}, clear=True)` |
+| `GenerateCatImage` 500 timeout on cloud | `gpt-image-1` takes 30-60s, exceeds Arcade worker timeout | Known limitation (see below) |
+
+### Arcade Cloud Worker Timeout
+
+After resolving all secret-injection issues, `GenerateCatImage` successfully reaches OpenAI on Arcade Cloud but hits the platform's internal worker timeout (~30 seconds). `gpt-image-1` takes 30-60 seconds per image, which exceeds this limit.
+
+**Verification:** The error changed from `"OPENAI_API_KEY not set"` (secret not found) to `"net/http: request canceled (Client.Timeout exceeded while awaiting headers)"` (secret found, OpenAI call initiated, but timed out). Fast tools like `GetCatFact` work perfectly.
+
+**Impact:**
+- `GenerateCatImage` and `MeowMe` (which calls image generation internally) time out on Arcade Cloud
+- All other tools (`GetCatFact`, `GetUserAvatar`, `SendCatFact`, `SendCatImage`, `SaveImageLocally`) work correctly
+- The agent handles timeout errors gracefully — falls back to text-only delivery
+- When running locally via `arcade mcp`, there is no worker timeout and image generation works fully
+
+**This is a platform limitation, not a code bug.** The Arcade Cloud worker timeout is not configurable at the tool level. For production use cases with long-running operations, the tools work correctly via local MCP transport (`arcade mcp -p meow_me stdio`). The Arcade Cloud deployment demonstrates the architecture — complete agent-tool separation — even though the slowest operation hits a platform constraint.
+
+### How This Addresses the Reviewer Feedback
+
+**Issue 1 — Separation of concerns:**
+- Agent has **zero imports** from `meow_me.tools.*`
+- All tool calls go through `AsyncArcade` → Arcade Cloud → deployed MCP server
+- Complete process and network isolation
+- Auth handled entirely by Arcade platform (OAuth managed server-side)
+
+**Issue 2 — Agent vs deterministic software:**
+- `agent.py` contains no tool logic — it's obviously an LLM client
+- Create `Agent`, give it tools from Arcade, call `Runner.run()`
+- The LLM decides which tools to call based on the system prompt and conversation history
+- No hardcoded orchestration, no business logic in the agent
+
+### Gotchas
+
+28. **`arcade deploy` requires explicit `app.add_tool()` calls**: Unlike `arcade mcp` which discovers `@tool`-decorated functions via module scanning, `arcade deploy` requires tools to be explicitly registered on the `MCPApp` instance. Without this, the deployed server has no tools.
+
+29. **Arcade toolkit names are PascalCase**: `get_arcade_tools(client, toolkits=["meow_me"])` returns 0 tools. The correct name is `"MeowMe"` — Arcade converts the server name to PascalCase for the toolkit namespace. Verify with `arcade tools list` after deployment.
+
+30. **`--skip-validate` changes `--secrets` default to `skip`**: When deploying with `--skip-validate`, the `--secrets` flag silently defaults to `skip` mode, meaning no secrets are uploaded. Must explicitly pass `--secrets all` to push `.env` secrets during deploy.
+
+31. **Arcade Cloud secrets require `requires_secrets` declaration**: Uploading secrets via `arcade deploy --secrets all` or `arcade secret set` stores them in the platform. But `context.get_secret()` only finds them if the tool declares `@tool(requires_secrets=["KEY"])`. Without this decorator attribute, the Arcade Engine doesn't populate the secret in the tool's execution context. Locally, `os.getenv()` works as a fallback, masking this issue.
+
+32. **Arcade Cloud worker timeout**: The platform has an internal timeout for tool execution (~30 seconds). Long-running operations like `gpt-image-1` image generation (30-60 seconds) exceed this limit. Fast tools work fine. There is no tool-level configuration to extend the timeout. For long-running tools, use local MCP transport instead.
+
+33. **Windows `arcade deploy` encoding**: Arcade's CLI uses Unicode characters (checkmarks, progress indicators) that fail with Windows cp1252 encoding. Set `PYTHONIOENCODING=utf-8` before running `arcade deploy`.
+
+### Test Coverage (Session 7)
+
+**Pytest (128 unit tests):**
+```
+tests/test_facts.py   - 11 tests (unchanged)
+tests/test_avatar.py  - 13 tests (unchanged)
+tests/test_slack.py   - 34 tests (unchanged)
+tests/test_image.py   - 31 tests (up from 26: added context param, save_image_locally MCP tool)
+tests/test_agent.py   - 31 tests (down from 46: removed wrapper/auth tests, added Arcade SDK tests)
+tests/test_evals.py   -  8 tests (unchanged)
+Total: 128 tests, all passing
+```
+
+Test count decreased from 138 to 128 because the 7 `@function_tool` wrappers and agent-side token management no longer exist — those ~15 wrapper/auth tests were replaced by ~5 Arcade SDK integration tests. The removed tests validated code that was deleted as part of the separation of concerns.
+
+**Arcade Evaluations (12 cases across 2 suites):** Unchanged.
+
+**Total Test Coverage: 140 test cases (128 unit + 12 behavioral)**
+
+### Files Modified
+
+| File | Change | Lines |
+|------|--------|-------|
+| `agent.py` | **Major rewrite** — deleted 7 wrappers, token management, image stash; added Arcade SDK integration | 940 → 538 |
+| `tools/image.py` | Added `context.get_secret()`, `requires_secrets`, `save_image_locally` as `@tool` | +63 |
+| `tools/slack.py` | Added `context.get_secret()`, `requires_secrets` on `meow_me`; `_get_token()` fallback | +31 |
+| `tools/avatar.py` | Added `_get_token()` env var fallback | +12 |
+| `server.py` | Explicit `app.add_tool()` for `arcade deploy` compatibility | +20 |
+| `tests/test_image.py` | Mock context, `save_image_locally` tests | 26 → 31 tests |
+| `tests/test_agent.py` | Deleted wrapper tests, added Arcade SDK tests | 46 → 31 tests |
+| `pyproject.toml` | Added `agents-arcade>=0.1.0` | +1 |
+
+### Tools & Frameworks (Session 7 additions)
+
+- **[agents-arcade](https://github.com/ArcadeAI/openai-agents-arcade)** — Arcade ↔ OpenAI Agents bridge (`get_arcade_tools()`)
+- **[arcadepy](https://github.com/ArcadeAI/arcade-py)** — Arcade Python SDK (remote tool execution via `AsyncArcade`)
+- **[arcade deploy](https://docs.arcade.dev)** — Cloud deployment of MCP tools
+

@@ -2,13 +2,16 @@
 
 import asyncio
 import base64
+import hashlib
 import io
 import logging
 import os
+import pathlib
+import tempfile
 from typing import Annotated
 
 import httpx
-from arcade_mcp_server import tool
+from arcade_mcp_server import Context, tool
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -65,9 +68,9 @@ def _make_png_file(data: bytes) -> io.BytesIO:
     return buf
 
 
-def _generate_image_openai(avatar_bytes: bytes, prompt: str) -> str:
+def _generate_image_openai(avatar_bytes: bytes, prompt: str, api_key: str | None = None) -> str:
     """Call OpenAI images.edit and return base64-encoded PNG."""
-    client = OpenAI()
+    client = OpenAI(api_key=api_key) if api_key else OpenAI()
     response = client.images.edit(
         model="gpt-image-1",
         image=_make_png_file(avatar_bytes),
@@ -115,8 +118,9 @@ def get_last_generated_image() -> dict:
     return _last_generated_image
 
 
-@tool
+@tool(requires_secrets=["OPENAI_API_KEY"])
 async def generate_cat_image(
+    context: Context,
     cat_fact: Annotated[str, "The cat fact to incorporate into the image. Call get_cat_fact first to get one."],
     avatar_url: Annotated[str, "Full HTTPS URL of the user's avatar image. Call get_user_avatar first to get this URL."],
     style: Annotated[str, "Art style: cartoon, watercolor, anime, or photorealistic"] = "cartoon",
@@ -161,9 +165,13 @@ async def generate_cat_image(
     style = style if style in STYLE_PROMPTS else DEFAULT_STYLE
     prompt = _compose_prompt(cat_fact, style)
 
-    # Check for OpenAI API key
-    if not os.getenv("OPENAI_API_KEY"):
-        logger.error("OPENAI_API_KEY not set")
+    # Get OpenAI API key from Arcade secrets (cloud) or env var (local)
+    try:
+        openai_key = context.get_secret("OPENAI_API_KEY")
+    except Exception:
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+    if not openai_key:
+        logger.error("OPENAI_API_KEY not available")
         return {
             "error": "OPENAI_API_KEY not set. Image generation requires an OpenAI API key.",
             "prompt_used": prompt,
@@ -187,7 +195,7 @@ async def generate_cat_image(
     try:
         # Generate image (sync call, run in thread to avoid blocking event loop)
         logger.debug("Calling OpenAI image generation...")
-        image_b64 = await asyncio.to_thread(_generate_image_openai, avatar_bytes, prompt)
+        image_b64 = await asyncio.to_thread(_generate_image_openai, avatar_bytes, prompt, openai_key)
         logger.debug("Image generated: %d bytes base64", len(image_b64))
     except Exception as e:
         logger.error("Image generation failed: %s", e)
@@ -229,3 +237,42 @@ async def generate_cat_image(
         result["_mcp_image"] = {"data": preview_b64, "mimeType": "image/jpeg"}
 
     return result
+
+
+@tool
+async def save_image_locally(
+    image_base64: Annotated[str, "Base64-encoded PNG data, or '__last__' to use the most recently generated image"] = "__last__",
+    cat_fact: Annotated[str, "The cat fact used to generate the image (used in filename)"] = "",
+) -> dict:
+    """Save a generated cat image to a local file.
+
+    Use after generate_cat_image to save the result to disk. Defaults to
+    using the most recently generated image if image_base64 is '__last__'.
+    """
+    if image_base64 == "__last__":
+        if _last_generated_image.get("base64"):
+            image_base64 = _last_generated_image["base64"]
+            cat_fact = cat_fact or _last_generated_image.get("cat_fact", "")
+        else:
+            return {"error": "No image generated yet. Call generate_cat_image first."}
+
+    if not image_base64:
+        return {"error": "No image data provided."}
+
+    try:
+        image_bytes = base64.b64decode(image_base64)
+        output_dir = pathlib.Path(tempfile.gettempdir()) / "meow_art"
+        output_dir.mkdir(exist_ok=True)
+
+        name_hash = hashlib.md5(cat_fact.encode()).hexdigest()[:8]
+        filepath = output_dir / f"meow_art_{name_hash}.png"
+        filepath.write_bytes(image_bytes)
+
+        return {
+            "saved": True,
+            "path": str(filepath),
+            "size_bytes": len(image_bytes),
+            "cat_fact": cat_fact,
+        }
+    except Exception as e:
+        return {"error": f"Failed to save image: {e}"}

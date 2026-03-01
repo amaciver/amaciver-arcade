@@ -1,10 +1,20 @@
 """Slack avatar tools - retrieve user's profile avatar."""
 
+import os
+
 import httpx
 from arcade_mcp_server import Context, tool
 from arcade_mcp_server.auth import Slack
 
 SLACK_API_BASE = "https://slack.com/api"
+
+
+def _get_token(context: Context) -> str:
+    """Get Slack token from Arcade OAuth context, falling back to env var."""
+    token = context.get_auth_token_or_empty()
+    if not token:
+        token = os.getenv("SLACK_BOT_TOKEN", "")
+    return token
 
 
 async def _get_own_user_id(token: str) -> str:
@@ -68,7 +78,7 @@ async def get_user_avatar(
     Automatically identifies you from the Slack auth token, retrieves your
     profile, and returns your avatar image URL.
     """
-    token = context.get_auth_token_or_empty()
+    token = _get_token(context)
 
     user_id = await _get_own_user_id(token)
     user_info = await _get_user_info(token, user_id)

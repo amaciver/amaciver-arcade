@@ -15,6 +15,19 @@ SLACK_API_BASE = "https://slack.com/api"
 MEOWFACTS_URL = "https://meowfacts.herokuapp.com/"
 
 
+def _get_token(context: Context) -> str:
+    """Get Slack token from Arcade OAuth context, falling back to env var.
+
+    When tools are called via Arcade cloud, the context provides the OAuth
+    token. When running locally with --slack mode, SLACK_BOT_TOKEN env var
+    is used as a fallback.
+    """
+    token = context.get_auth_token_or_empty()
+    if not token:
+        token = os.getenv("SLACK_BOT_TOKEN", "")
+    return token
+
+
 async def _get_own_user_id(token: str) -> str:
     """Get the authenticated user's Slack ID via auth.test."""
     async with httpx.AsyncClient() as client:
@@ -88,7 +101,7 @@ async def _send_slack_message(token: str, channel: str, text: str) -> dict:
     }
 
 
-@tool(requires_auth=Slack(scopes=["chat:write", "im:write", "users:read"]))
+@tool(requires_auth=Slack(scopes=["chat:write", "im:write", "users:read"]), requires_secrets=["OPENAI_API_KEY"])
 async def meow_me(
     context: Context,
 ) -> dict:
@@ -103,7 +116,7 @@ async def meow_me(
     uploads only work with a direct SLACK_BOT_TOKEN. When files:write is
     unavailable, this tool sends a text-only cat fact to your DMs.
     """
-    token = context.get_auth_token_or_empty()
+    token = _get_token(context)
 
     # 1. Get the authenticated user's ID
     user_id = await _get_own_user_id(token)
@@ -118,7 +131,13 @@ async def meow_me(
     image_generated = False
     image_sent = False
 
-    if os.getenv("OPENAI_API_KEY"):
+    # Get OpenAI API key from Arcade secrets (cloud) or env var (local)
+    try:
+        openai_key = context.get_secret("OPENAI_API_KEY")
+    except Exception:
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+
+    if openai_key:
         try:
             # Get avatar URL
             user_info = await _get_user_info(token, user_id)
@@ -127,7 +146,7 @@ async def meow_me(
             # Download avatar and generate image
             avatar_bytes = await _download_avatar(avatar_url)
             prompt = _compose_prompt(fact, "cartoon")
-            image_b64 = _generate_image_openai(avatar_bytes, prompt)
+            image_b64 = _generate_image_openai(avatar_bytes, prompt, openai_key)
             image_generated = True
 
             # Upload image to DM
@@ -166,7 +185,7 @@ async def send_cat_fact(
 
     Fetches cat facts from MeowFacts API and posts them to the given channel.
     """
-    token = context.get_auth_token_or_empty()
+    token = _get_token(context)
     count = max(1, min(count, 3))
 
     # Fetch facts
@@ -355,7 +374,7 @@ async def send_cat_image(
     Arcade's built-in Slack OAuth does not support files:write, so this tool
     falls back to sending the cat fact as text if file upload fails.
     """
-    token = context.get_auth_token_or_empty()
+    token = _get_token(context)
 
     # Resolve __last__ reference from server-side stash
     if image_base64 == "__last__":

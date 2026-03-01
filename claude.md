@@ -39,8 +39,9 @@ This is an **Arcade.dev Engineering Interview Project** with these requirements:
 **What This Project Does:** MCP server + CLI agent that fetches cat facts, generates cat-themed art from Slack avatars using OpenAI's gpt-image-1, and sends results to Slack.
 
 **Tech Stack:**
-- `arcade-mcp-server` - MCP framework with built-in OAuth
-- `openai-agents` - Agent framework (gpt-4o-mini)
+- `arcade-mcp-server` - MCP framework with built-in OAuth (tools deployed to Arcade Cloud)
+- `arcadepy` + `agents-arcade` - Agent connects to deployed tools via Arcade SDK
+- `openai-agents` - Agent framework (gpt-4o-mini, thin LLM client)
 - `openai` - Image generation (gpt-image-1)
 - Slack API - Messaging and file uploads
 
@@ -48,17 +49,22 @@ This is an **Arcade.dev Engineering Interview Project** with these requirements:
 
 ## Critical Architecture Patterns
 
-### Dual Auth Modes
-The CLI agent supports two authentication modes (controlled by `--slack` flag):
+### Agent-Tool Separation (Arcade SDK)
+The CLI agent is a **thin LLM client** that calls tools remotely via the Arcade SDK.
+- Agent (`agent.py`) has **zero imports** from `meow_me.tools.*`
+- Tools are deployed to Arcade Cloud via `arcade deploy -e server.py`
+- Agent uses `agents-arcade.get_arcade_tools()` to discover and call tools
+- All tool execution happens on the Arcade platform, not in the agent process
+- Auth is handled entirely by Arcade (OAuth flow managed server-side)
+- **Pre-refactor baseline:** Commit `7a88607` is the last fully-working monolithic version (agent + tools in same process, 138 tests, all features working including image generation)
 
+### Dual Auth Modes
 **Default mode (Arcade OAuth):**
-- Session cache → Arcade OAuth (browser-based)
+- Auth managed by Arcade platform (browser-based OAuth)
 - Scopes: `chat:write`, `im:write`, `users:read` (NO `files:write`)
-- Images saved locally + ASCII preview + text-only DMs
-- File paths shown: `meow_art_20260216_140523.png`
 
 **`--slack` mode (Bot Token):**
-- Session cache → `SLACK_BOT_TOKEN` env var
+- `SLACK_BOT_TOKEN` passed as env var; MCP tools fall back to it via `_get_token()`
 - All scopes including `files:write`
 - Full Slack integration: direct channel image uploads
 - Requires user resolution (bot token shows bot identity, not user)
@@ -75,6 +81,12 @@ This matters for:
 - Arcade evaluations (`ExpectedMCPToolCall` must use prefixed names)
 - MCP client integration
 - Tool discovery and registration
+
+### Arcade Cloud Secrets
+Tools access secrets via `context.get_secret("KEY")`, NOT `os.getenv()`.
+- `@tool(requires_secrets=["OPENAI_API_KEY"])` is required for Arcade Engine to inject secrets
+- Secrets uploaded during `arcade deploy --secrets all` or via `arcade secret set`
+- `os.getenv()` fallback only works locally (env vars are NOT injected on Arcade Cloud)
 
 ### Image Generation Flow
 1. `generate_cat_image` generates full PNG (~2MB) + compressed JPEG thumbnail (~50-100KB)
@@ -109,24 +121,46 @@ This matters for:
    - `arcade mcp` never executes `server.py`
    - Put `load_dotenv()` and monkey-patches in `__init__.py`
 
+6. **`arcade deploy` requires explicit `app.add_tool()`:**
+   - Unlike `arcade mcp` (which discovers via module scan), `arcade deploy` needs explicit registration
+   - Without `app.add_tool()`, the deployed server has no tools
+
+7. **Toolkit names are PascalCase:**
+   - `get_arcade_tools(client, toolkits=["meow_me"])` returns 0 tools
+   - Correct: `toolkits=["MeowMe"]` — Arcade converts server name to PascalCase
+
+8. **`--skip-validate` changes `--secrets` default to `skip`:**
+   - Must explicitly pass `--secrets all` to upload `.env` secrets during deploy
+   - Without this, secrets are not bound to the deployed server
+
+9. **`requires_secrets` is mandatory for cloud secrets:**
+   - `context.get_secret("KEY")` only works if `@tool(requires_secrets=["KEY"])` is declared
+   - Without the decorator, Arcade Engine doesn't populate the secret in the context
+   - `os.getenv()` masks this locally but fails on cloud
+
+10. **Arcade Cloud worker timeout (~30s):**
+    - `gpt-image-1` takes 30-60s, exceeds the platform's worker timeout
+    - Fast tools (GetCatFact, etc.) work fine
+    - Image generation works via local MCP transport (`arcade mcp -p meow_me stdio`)
+
 ### Slack API
 
-6. **Channel resolution asymmetry:**
+11. **Channel resolution asymmetry:**
    - `chat.postMessage` accepts channel names (`#general`)
    - `files.completeUploadExternal` requires channel IDs (`C01234567`)
    - Must resolve names to IDs for file uploads
 
-7. **Bot membership for file uploads:**
+12. **Bot membership for file uploads:**
    - `files.completeUploadExternal` fails if bot not in channel
    - Use `conversations.join` before upload (requires `channels:join` scope)
    - Handle `missing_scope` gracefully
 
-8. **`conversations.list` type filtering:**
+13. **`conversations.list` type filtering:**
    - Requesting `types: "public_channel,private_channel"` requires BOTH scopes
    - If missing `groups:read`, entire request fails (not partial results)
    - Only request types you have scopes for
 
-9. **Self-DM flow:**
+14. **Self-DM flow:**
    - `auth.test` → get user ID
    - `conversations.open` → create DM channel
    - `chat.postMessage` → send to DM channel
@@ -134,15 +168,15 @@ This matters for:
 
 ### OpenAI & Images
 
-10. **`asyncio.to_thread` for sync OpenAI client:**
+15. **`asyncio.to_thread` for sync OpenAI client:**
     - `gpt-image-1` uses sync `OpenAI()` client
     - Wrap in `asyncio.to_thread()` to avoid blocking event loop
 
-11. **BytesIO naming:**
+16. **BytesIO naming:**
     - OpenAI SDK needs `file_like.name` for MIME type detection
     - Set `.name = "avatar.png"` on BytesIO objects
 
-12. **ImageContent monkey-patch:**
+17. **ImageContent monkey-patch:**
     - Arcade `@tool` functions must return dicts (per typed schemas)
     - `convert_to_mcp_content()` converts dicts to MCP content (default: TextContent only)
     - Patched in `__init__.py` to detect `_mcp_image` key and emit ImageContent
@@ -150,11 +184,11 @@ This matters for:
 
 ### Windows-Specific
 
-13. **Encoding for subprocess:**
+18. **Encoding for subprocess:**
     - Set `PYTHONIOENCODING=utf-8` for `arcade mcp` calls
     - Windows cp1252 can't render Arcade's Unicode output
 
-14. **Claude Desktop paths:**
+19. **Claude Desktop paths:**
     - Store install: `%APPDATA%\Claude\`
     - Windows Store install: `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\`
     - Use `--directory` flag in uv args
@@ -163,7 +197,7 @@ This matters for:
 
 ## Testing Strategy
 
-**138 pytest unit tests** - Implementation correctness
+**pytest unit tests** - Implementation correctness
 - Fast (~3 sec), deterministic, free
 - Mocks all external APIs
 - Tests edge cases, error handling, fallbacks
@@ -189,23 +223,24 @@ uv run arcade evals evals/    # Behavioral evals
 from arcade_mcp_server import tool, Context
 from arcade_mcp_server.auth import Slack
 
-@tool(requires_auth=Slack(scopes=["chat:write"]))
+@tool(requires_auth=Slack(scopes=["chat:write"]), requires_secrets=["OPENAI_API_KEY"])
 async def send_message(context: Context, channel: str, message: str):
-    token = context.authorization.token
+    token = context.get_auth_token_or_empty() or os.getenv("SLACK_BOT_TOKEN", "")
+    api_key = context.get_secret("OPENAI_API_KEY")  # Arcade Cloud injects via requires_secrets
     # ... implementation ...
     return {"success": True}
 ```
 
-### Agent Tool Wrapper Template
+### Agent Setup (Arcade SDK, no tool wrappers)
 ```python
-from openai_agents.function_tool import function_tool
+from agents import Agent, Runner
+from arcadepy import AsyncArcade
+from agents_arcade import get_arcade_tools
 
-@function_tool
-async def send_message_wrapper(channel: str, message: str) -> str:
-    token = await _get_slack_token()  # Session cache → env → Arcade OAuth
-    if not token:
-        return "❌ No Slack authentication available"
-    # ... call MCP tool or direct API ...
+client = AsyncArcade()  # Uses ARCADE_API_KEY env var
+tools = await get_arcade_tools(client, toolkits=["MeowMe"])  # PascalCase!
+agent = Agent(name="Meow Art", model="gpt-4o-mini", tools=tools)
+result = await Runner.run(agent, input=history, context={"user_id": email})
 ```
 
 ### Evaluation Case Template
@@ -230,10 +265,10 @@ suite.add_case(
 ```bash
 # Required for agent
 OPENAI_API_KEY=sk-...          # gpt-4o-mini (agent) + gpt-image-1 (images)
+ARCADE_API_KEY=arc-...         # Required: connects agent to Arcade-deployed tools
 
-# Optional - choose one auth mode
+# Optional
 SLACK_BOT_TOKEN=xoxb-...       # Direct bot token (requires --slack flag)
-ARCADE_API_KEY=arc-...         # Arcade OAuth (browser-based)
 ARCADE_USER_ID=you@email.com   # Skip email prompt in Arcade flow
 ```
 
@@ -252,7 +287,7 @@ uv run python -m meow_me              # Arcade OAuth
 uv run python -m meow_me --slack      # Bot token
 
 # Testing
-uv run pytest -v                      # All 138 unit tests
+uv run pytest -v                      # All 128 unit tests
 uv run arcade evals evals/            # All 12 evaluations
 
 # MCP server
@@ -268,13 +303,13 @@ uv run arcade mcp -p meow_me http     # Cursor/VS Code
 meow_me/
 ├── src/meow_me/
 │   ├── __init__.py         # Entry point (load_dotenv, patches)
-│   ├── agent.py            # CLI agent (7 tool wrappers)
+│   ├── agent.py            # Thin LLM agent (calls tools via Arcade SDK, zero tool logic)
 │   └── tools/
 │       ├── facts.py        # get_cat_fact
 │       ├── avatar.py       # get_user_avatar
-│       ├── image.py        # generate_cat_image
+│       ├── image.py        # generate_cat_image, save_image_locally
 │       └── slack.py        # meow_me, send_cat_fact, send_cat_image
-├── tests/                  # 138 pytest unit tests
+├── tests/                  # 128 pytest unit tests
 ├── evals/                  # 12 Arcade evaluations
 └── examples/               # Sample generated images
 ```
@@ -283,9 +318,10 @@ meow_me/
 
 ## Known Limitations
 
-1. **Arcade OAuth lacks `files:write`** - Image uploads require `SLACK_BOT_TOKEN`
-2. **Claude Desktop ~1MB MCP content limit** - Send JPEG thumbnail, not full PNG
-3. **Image generation time** - gpt-image-1 takes 30-60 seconds per image
+1. **Arcade Cloud worker timeout** - `gpt-image-1` takes 30-60s, exceeds Arcade Cloud's ~30s worker timeout. Image generation works locally via `arcade mcp` but times out when deployed. Agent falls back to text-only delivery gracefully.
+2. **Arcade OAuth lacks `files:write`** - Image uploads require `SLACK_BOT_TOKEN`
+3. **Claude Desktop ~1MB MCP content limit** - Send JPEG thumbnail, not full PNG
+4. **Image generation time** - gpt-image-1 takes 30-60 seconds per image
 
 ---
 
@@ -295,4 +331,4 @@ See [meow_me/DEVELOPMENT_NOTES.md](meow_me/DEVELOPMENT_NOTES.md) for session-by-
 
 ---
 
-**Last Updated:** Session 6 (Arcade Evaluations implementation)
+**Last Updated:** Session 7 (Agent-Tool Separation via Arcade Cloud Deployment)
