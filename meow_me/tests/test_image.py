@@ -1,6 +1,12 @@
-"""Tests for the image generation tools (image.py)."""
+"""Tests for the image generation tools (image.py).
+
+Tests the async start/poll pattern for image generation:
+- start_cat_image_generation: validates inputs, starts background thread
+- check_image_status: polls for completion, stashes results
+"""
 
 import base64
+import threading
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,11 +17,13 @@ from meow_me.tools.image import (
     _make_png_file,
     _make_preview_thumbnail,
     _last_generated_image,
+    _pending_jobs,
     _PLACEHOLDER_PNG_B64,
+    _try_get_secret,
     STYLE_PROMPTS,
     DEFAULT_STYLE,
-    generate_cat_image,
-    save_image_locally,
+    start_cat_image_generation,
+    check_image_status,
 )
 
 
@@ -114,38 +122,51 @@ class TestMakePngFile:
         assert result.tell() == 0
 
 
-# --- Tests for generate_cat_image tool ---
+# --- Tests for _try_get_secret ---
 
-class TestGenerateCatImage:
+class TestTryGetSecret:
+    def test_returns_secret_from_context(self):
+        ctx = _mock_context({"OPENAI_API_KEY": "sk-test"})
+        assert _try_get_secret(ctx, "OPENAI_API_KEY") == "sk-test"
+
+    def test_falls_back_to_env_var(self):
+        ctx = _mock_context()  # No secrets
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-from-env"}, clear=True):
+            assert _try_get_secret(ctx, "OPENAI_API_KEY") == "sk-from-env"
+
+    def test_returns_empty_when_not_available(self):
+        ctx = _mock_context()  # No secrets
+        with patch.dict("os.environ", {}, clear=True):
+            assert _try_get_secret(ctx, "OPENAI_API_KEY") == ""
+
+
+# --- Tests for start_cat_image_generation ---
+
+class TestStartCatImageGeneration:
     def setup_method(self):
         _last_generated_image.clear()
+        _pending_jobs.clear()
+
+    def teardown_method(self):
+        _last_generated_image.clear()
+        _pending_jobs.clear()
 
     @pytest.mark.asyncio
     async def test_error_when_no_api_key(self):
         ctx = _mock_context()  # No secrets
         with patch.dict("os.environ", {}, clear=True):
-            result = await generate_cat_image(
+            result = await start_cat_image_generation(
                 context=ctx,
                 cat_fact="Cats are great",
                 avatar_url="https://example.com/avatar.png",
             )
         assert "error" in result
         assert "OPENAI_API_KEY" in result["error"]
-        assert result["cat_fact"] == "Cats are great"
-        assert result["style"] == "cartoon"
 
     @pytest.mark.asyncio
-    async def test_placeholder_is_valid_base64(self):
-        decoded = base64.b64decode(_PLACEHOLDER_PNG_B64)
-        # Should start with PNG magic bytes
-        assert decoded[:4] == b"\x89PNG"
-
-    @pytest.mark.asyncio
-    async def test_successful_generation(self):
-        fake_b64 = base64.b64encode(b"fake_image").decode()
-        fake_avatar = b"\x89PNGfake"
-        fake_thumb = base64.b64encode(b"thumbnail").decode()
+    async def test_returns_job_id(self):
         ctx = _mock_context({"OPENAI_API_KEY": "sk-test"})
+        fake_avatar = b"\x89PNGfake"
 
         with patch(
             "meow_me.tools.image._download_avatar",
@@ -154,83 +175,62 @@ class TestGenerateCatImage:
         ):
             with patch(
                 "meow_me.tools.image._generate_image_openai",
-                return_value=fake_b64,
+                return_value=base64.b64encode(b"fake_image").decode(),
             ):
-                with patch(
-                    "meow_me.tools.image._make_preview_thumbnail",
-                    return_value=fake_thumb,
-                ):
-                    result = await generate_cat_image(
-                        context=ctx,
-                        cat_fact="Cats purr at 25 Hz",
-                        avatar_url="https://example.com/avatar.png",
-                        style="watercolor",
-                    )
+                result = await start_cat_image_generation(
+                    context=ctx,
+                    cat_fact="Cats purr at 25 Hz",
+                    avatar_url="https://example.com/avatar.png",
+                )
 
-        assert result["success"] is True
-        assert result["cat_fact"] == "Cats purr at 25 Hz"
-        assert result["style"] == "watercolor"
-        assert "watercolor" in result["prompt_used"].lower()
-        # _mcp_image contains compressed JPEG thumbnail (not the full PNG)
-        assert "_mcp_image" in result
-        assert result["_mcp_image"]["data"] == fake_thumb
-        assert result["_mcp_image"]["mimeType"] == "image/jpeg"
-        # Server-side stash has the full-res PNG
-        assert _last_generated_image["base64"] == fake_b64
-        assert _last_generated_image["cat_fact"] == "Cats purr at 25 Hz"
+        assert "job_id" in result
+        assert result["status"] == "generating"
+        assert "estimated_seconds" in result
+        # Job should be in pending jobs
+        assert result["job_id"] in _pending_jobs
 
     @pytest.mark.asyncio
-    async def test_thumbnail_failure_omits_mcp_image(self):
-        """If thumbnail generation fails, result still succeeds without _mcp_image."""
-        fake_b64 = base64.b64encode(b"fake_image").decode()
-        fake_avatar = b"\x89PNGfake"
-        ctx = _mock_context({"OPENAI_API_KEY": "sk-test"})
+    async def test_none_avatar_url_returns_error(self):
+        ctx = _mock_context()
+        result = await start_cat_image_generation(
+            context=ctx,
+            cat_fact="Cats are great",
+            avatar_url=None,
+        )
+        assert "error" in result
+        assert "avatar_url" in result["error"].lower()
 
-        with patch(
-            "meow_me.tools.image._download_avatar",
-            new_callable=AsyncMock,
-            return_value=fake_avatar,
-        ):
-            with patch(
-                "meow_me.tools.image._generate_image_openai",
-                return_value=fake_b64,
-            ):
-                with patch(
-                    "meow_me.tools.image._make_preview_thumbnail",
-                    side_effect=Exception("PIL failed"),
-                ):
-                    result = await generate_cat_image(
-                        context=ctx,
-                        cat_fact="Test",
-                        avatar_url="https://example.com/avatar.png",
-                    )
+    @pytest.mark.asyncio
+    async def test_empty_avatar_url_returns_error(self):
+        ctx = _mock_context()
+        result = await start_cat_image_generation(
+            context=ctx,
+            cat_fact="Cats are great",
+            avatar_url="",
+        )
+        assert "error" in result
 
-        assert result["success"] is True
-        assert "_mcp_image" not in result
-        # Stash still has the full image
-        assert _last_generated_image["base64"] == fake_b64
+    @pytest.mark.asyncio
+    async def test_none_cat_fact_returns_error(self):
+        ctx = _mock_context()
+        result = await start_cat_image_generation(
+            context=ctx,
+            cat_fact=None,
+            avatar_url="https://example.com/avatar.png",
+        )
+        assert "error" in result
+        assert "cat_fact" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_invalid_style_defaults_to_cartoon(self):
         ctx = _mock_context()  # No secrets → error path, but style gets normalized
-        result = await generate_cat_image(
+        result = await start_cat_image_generation(
             context=ctx,
             cat_fact="Test",
             avatar_url="https://example.com/avatar.png",
             style="nonexistent",
         )
         assert result["style"] == "cartoon"
-
-    @pytest.mark.asyncio
-    async def test_prompt_includes_fact(self):
-        ctx = _mock_context()  # No secrets → error path
-        result = await generate_cat_image(
-            context=ctx,
-            cat_fact="Cats have 230 bones",
-            avatar_url="https://example.com/avatar.png",
-        )
-        # No prompt_used when error (no API key), but the fact is in the result
-        assert result["cat_fact"] == "Cats have 230 bones"
 
     @pytest.mark.asyncio
     async def test_avatar_download_failure(self):
@@ -240,7 +240,7 @@ class TestGenerateCatImage:
             new_callable=AsyncMock,
             side_effect=Exception("Connection refused"),
         ):
-            result = await generate_cat_image(
+            result = await start_cat_image_generation(
                 context=ctx,
                 cat_fact="Test",
                 avatar_url="https://bad-url.com/avatar.png",
@@ -249,74 +249,134 @@ class TestGenerateCatImage:
         assert "download avatar" in result["error"].lower()
 
     @pytest.mark.asyncio
-    async def test_openai_generation_failure(self):
-        ctx = _mock_context({"OPENAI_API_KEY": "sk-test"})
-        with patch(
-            "meow_me.tools.image._download_avatar",
-            new_callable=AsyncMock,
-            return_value=b"fake_avatar",
-        ):
-            with patch(
-                "meow_me.tools.image._generate_image_openai",
-                side_effect=Exception("API rate limit"),
-            ):
-                result = await generate_cat_image(
-                    context=ctx,
-                    cat_fact="Test",
-                    avatar_url="https://example.com/avatar.png",
-                )
-        assert "error" in result
-        assert "generation failed" in result["error"].lower()
+    async def test_placeholder_is_valid_base64(self):
+        decoded = base64.b64decode(_PLACEHOLDER_PNG_B64)
+        assert decoded[:4] == b"\x89PNG"
 
-    @pytest.mark.asyncio
-    async def test_none_avatar_url_returns_error(self):
-        ctx = _mock_context()
-        result = await generate_cat_image(
-            context=ctx,
-            cat_fact="Cats are great",
-            avatar_url=None,
-        )
-        assert "error" in result
-        assert "avatar_url" in result["error"].lower()
-        assert "get_user_avatar" in result["error"]
 
-    @pytest.mark.asyncio
-    async def test_empty_avatar_url_returns_error(self):
-        ctx = _mock_context()
-        result = await generate_cat_image(
-            context=ctx,
-            cat_fact="Cats are great",
-            avatar_url="",
-        )
-        assert "error" in result
-        assert "avatar_url" in result["error"].lower()
+# --- Tests for check_image_status ---
 
-    @pytest.mark.asyncio
-    async def test_none_cat_fact_returns_error(self):
-        ctx = _mock_context()
-        result = await generate_cat_image(
-            context=ctx,
-            cat_fact=None,
-            avatar_url="https://example.com/avatar.png",
-        )
-        assert "error" in result
-        assert "cat_fact" in result["error"].lower()
-        assert "get_cat_fact" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_error_results_have_no_mcp_image(self):
-        """Error responses should not include _mcp_image."""
-        ctx = _mock_context()  # No secrets
-        result = await generate_cat_image(
-            context=ctx,
-            cat_fact="Test",
-            avatar_url="https://example.com/avatar.png",
-        )
-        assert "error" in result
-        assert "_mcp_image" not in result
+class TestCheckImageStatus:
+    def setup_method(self):
+        _last_generated_image.clear()
+        _pending_jobs.clear()
 
     def teardown_method(self):
         _last_generated_image.clear()
+        _pending_jobs.clear()
+
+    @pytest.mark.asyncio
+    async def test_unknown_job_id(self):
+        result = await check_image_status(job_id="nonexistent")
+        assert "error" in result
+        assert "Unknown job_id" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_in_progress_job(self):
+        # Create a mock thread that's "alive"
+        mock_thread = MagicMock(spec=threading.Thread)
+        mock_thread.is_alive.return_value = True
+        _pending_jobs["test123"] = {
+            "thread": mock_thread,
+            "cat_fact": "Test",
+            "style": "cartoon",
+        }
+
+        result = await check_image_status(job_id="test123")
+        assert result["status"] == "generating"
+        assert result["job_id"] == "test123"
+
+    @pytest.mark.asyncio
+    async def test_completed_job(self):
+        fake_b64 = base64.b64encode(b"fake_image").decode()
+        mock_thread = MagicMock(spec=threading.Thread)
+        mock_thread.is_alive.return_value = False
+        _pending_jobs["done123"] = {
+            "thread": mock_thread,
+            "cat_fact": "Cats purr",
+            "style": "watercolor",
+            "result": fake_b64,
+        }
+
+        with patch("meow_me.tools.image._make_preview_thumbnail", return_value="thumb_b64"):
+            result = await check_image_status(job_id="done123")
+
+        assert result["status"] == "complete"
+        assert result["cat_fact"] == "Cats purr"
+        assert result["style"] == "watercolor"
+        assert result["image_size_bytes"] == len(fake_b64)
+        # Should stash in _last_generated_image
+        assert _last_generated_image["base64"] == fake_b64
+        assert _last_generated_image["cat_fact"] == "Cats purr"
+
+    @pytest.mark.asyncio
+    async def test_completed_job_with_preview(self):
+        fake_b64 = base64.b64encode(b"fake_image").decode()
+        fake_thumb = "thumb_data"
+        mock_thread = MagicMock(spec=threading.Thread)
+        mock_thread.is_alive.return_value = False
+        _pending_jobs["preview123"] = {
+            "thread": mock_thread,
+            "cat_fact": "Test",
+            "style": "cartoon",
+            "result": fake_b64,
+        }
+
+        with patch("meow_me.tools.image._make_preview_thumbnail", return_value=fake_thumb):
+            result = await check_image_status(job_id="preview123")
+
+        assert "_mcp_image" in result
+        assert result["_mcp_image"]["data"] == fake_thumb
+        assert result["_mcp_image"]["mimeType"] == "image/jpeg"
+
+    @pytest.mark.asyncio
+    async def test_completed_job_thumbnail_failure(self):
+        """If thumbnail fails, result still succeeds without _mcp_image."""
+        fake_b64 = base64.b64encode(b"fake_image").decode()
+        mock_thread = MagicMock(spec=threading.Thread)
+        mock_thread.is_alive.return_value = False
+        _pending_jobs["nothumb"] = {
+            "thread": mock_thread,
+            "cat_fact": "Test",
+            "style": "cartoon",
+            "result": fake_b64,
+        }
+
+        with patch("meow_me.tools.image._make_preview_thumbnail", side_effect=Exception("PIL failed")):
+            result = await check_image_status(job_id="nothumb")
+
+        assert result["status"] == "complete"
+        assert "_mcp_image" not in result
+
+    @pytest.mark.asyncio
+    async def test_failed_job(self):
+        mock_thread = MagicMock(spec=threading.Thread)
+        mock_thread.is_alive.return_value = False
+        _pending_jobs["fail123"] = {
+            "thread": mock_thread,
+            "cat_fact": "Test",
+            "style": "cartoon",
+            "error": "API rate limit exceeded",
+        }
+
+        result = await check_image_status(job_id="fail123")
+        assert result["status"] == "failed"
+        assert "rate limit" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_no_result_job(self):
+        """Thread finished but no result and no error."""
+        mock_thread = MagicMock(spec=threading.Thread)
+        mock_thread.is_alive.return_value = False
+        _pending_jobs["empty123"] = {
+            "thread": mock_thread,
+            "cat_fact": "Test",
+            "style": "cartoon",
+        }
+
+        result = await check_image_status(job_id="empty123")
+        assert result["status"] == "failed"
+        assert "no image data" in result["error"].lower()
 
 
 # --- Tests for _make_preview_thumbnail ---
@@ -324,7 +384,6 @@ class TestGenerateCatImage:
 class TestMakePreviewThumbnail:
     def test_produces_smaller_output(self):
         """Thumbnail should be significantly smaller than the original."""
-        # Create a real 4x4 PNG to thumbnail
         from PIL import Image
         import io
 
@@ -334,11 +393,9 @@ class TestMakePreviewThumbnail:
         original_b64 = base64.b64encode(buf.getvalue()).decode()
 
         thumb_b64 = _make_preview_thumbnail(original_b64, size=50, quality=60)
-        # Thumbnail should be valid base64
         thumb_bytes = base64.b64decode(thumb_b64)
         assert len(thumb_bytes) > 0
-        # Thumbnail should be JPEG (starts with FFD8)
-        assert thumb_bytes[:2] == b"\xff\xd8"
+        assert thumb_bytes[:2] == b"\xff\xd8"  # JPEG magic
 
     def test_uses_placeholder_png(self):
         """Should work with the placeholder 1x1 PNG."""
@@ -388,71 +445,3 @@ class TestImageContentPatch:
         import arcade_mcp_server.server as server_mod
 
         assert server_mod.convert_to_mcp_content is convert_mod.convert_to_mcp_content
-
-
-# --- Tests for save_image_locally MCP tool ---
-
-class TestSaveImageLocally:
-    def setup_method(self):
-        _last_generated_image.clear()
-
-    def teardown_method(self):
-        _last_generated_image.clear()
-
-    @pytest.mark.asyncio
-    async def test_no_image_returns_error(self):
-        """save_image_locally should error when no image has been generated."""
-        result = await save_image_locally()
-        assert "error" in result
-        assert "No image generated" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_saves_stashed_image(self):
-        """save_image_locally should save the stashed image to a file."""
-        import pathlib
-
-        fake_png = base64.b64encode(b"fake_png_data").decode()
-        _last_generated_image["base64"] = fake_png
-        _last_generated_image["cat_fact"] = "Test fact"
-
-        result = await save_image_locally()
-        assert result["saved"] is True
-        assert "meow_art" in result["path"]
-        assert result["size_bytes"] > 0
-        assert result["cat_fact"] == "Test fact"
-
-        # Clean up
-        pathlib.Path(result["path"]).unlink(missing_ok=True)
-
-    @pytest.mark.asyncio
-    async def test_saves_explicit_base64(self):
-        """save_image_locally should accept explicit base64 data."""
-        import pathlib
-
-        fake_png = base64.b64encode(b"explicit_image_data").decode()
-        result = await save_image_locally(image_base64=fake_png, cat_fact="Explicit fact")
-        assert result["saved"] is True
-        assert result["cat_fact"] == "Explicit fact"
-
-        # Clean up
-        pathlib.Path(result["path"]).unlink(missing_ok=True)
-
-    @pytest.mark.asyncio
-    async def test_empty_base64_returns_error(self):
-        """save_image_locally should error on empty string."""
-        result = await save_image_locally(image_base64="")
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_stash_cat_fact_used_as_default(self):
-        """When using __last__, cat_fact defaults to the stashed value."""
-        import pathlib
-
-        fake_png = base64.b64encode(b"data").decode()
-        _last_generated_image["base64"] = fake_png
-        _last_generated_image["cat_fact"] = "Stashed fact"
-
-        result = await save_image_locally()
-        assert result["cat_fact"] == "Stashed fact"
-
-        pathlib.Path(result["path"]).unlink(missing_ok=True)

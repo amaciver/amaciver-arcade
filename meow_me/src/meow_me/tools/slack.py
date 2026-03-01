@@ -1,4 +1,10 @@
-"""Slack integration tools - send cat facts and images via Slack."""
+"""Slack integration tools - send cat facts and images via Slack.
+
+All tools use Arcade OAuth for user identity and basic messaging.
+When SLACK_BOT_TOKEN is deployed as a cloud secret, file uploads
+(images) are enabled via the bot token's files:write scope.
+Tools gracefully degrade to text-only when secrets are unavailable.
+"""
 
 import base64
 import os
@@ -16,16 +22,36 @@ MEOWFACTS_URL = "https://meowfacts.herokuapp.com/"
 
 
 def _get_token(context: Context) -> str:
-    """Get Slack token from Arcade OAuth context, falling back to env var.
+    """Get Slack OAuth token for identity and messaging.
 
     When tools are called via Arcade cloud, the context provides the OAuth
-    token. When running locally with --slack mode, SLACK_BOT_TOKEN env var
-    is used as a fallback.
+    token (identifies the human user). When running locally, SLACK_BOT_TOKEN
+    env var is used as a fallback.
     """
     token = context.get_auth_token_or_empty()
     if not token:
         token = os.getenv("SLACK_BOT_TOKEN", "")
     return token
+
+
+def _try_get_secret(context: Context, name: str) -> str:
+    """Try to get a cloud secret, return empty string if not available."""
+    try:
+        return context.get_secret(name)
+    except Exception:
+        return os.getenv(name, "")
+
+
+def _get_upload_token(context: Context) -> str:
+    """Get Slack token with files:write scope for file uploads.
+
+    Returns bot token (cloud secret) if available, otherwise falls back to
+    the OAuth token (which likely lacks files:write and will fail gracefully).
+    """
+    bot_token = _try_get_secret(context, "SLACK_BOT_TOKEN")
+    if bot_token:
+        return bot_token
+    return _get_token(context)
 
 
 async def _get_own_user_id(token: str) -> str:
@@ -101,24 +127,25 @@ async def _send_slack_message(token: str, channel: str, text: str) -> dict:
     }
 
 
-@tool(requires_auth=Slack(scopes=["chat:write", "im:write", "users:read"]), requires_secrets=["OPENAI_API_KEY"])
+@tool(requires_auth=Slack(scopes=["chat:write", "im:write", "users:read"]))
 async def meow_me(
     context: Context,
 ) -> dict:
-    """Send a random cat fact with cat-themed art as a Slack DM to yourself.
+    """Send a random cat fact with optional cat-themed art as a Slack DM to yourself.
 
     One-shot pipeline: fetches a cat fact, retrieves your avatar, generates
     a stylized cat-themed image from your avatar, and DMs the result to you.
-    Falls back to text-only if image generation is unavailable.
 
-    Note: Image upload requires a Slack token with files:write scope.
-    Arcade's built-in Slack OAuth does not support files:write, so image
-    uploads only work with a direct SLACK_BOT_TOKEN. When files:write is
-    unavailable, this tool sends a text-only cat fact to your DMs.
+    Capabilities depend on cloud secrets:
+    - OPENAI_API_KEY deployed: Generates cat-themed art from your avatar
+    - SLACK_BOT_TOKEN deployed: Uploads image directly to DM
+    - Neither: Sends text-only cat fact to your DMs (always works)
+
+    Check 'image_generated' and 'image_sent' in the response to see what happened.
     """
     token = _get_token(context)
 
-    # 1. Get the authenticated user's ID
+    # 1. Get the authenticated user's ID (OAuth → human identity)
     user_id = await _get_own_user_id(token)
 
     # 2. Open a DM channel
@@ -130,12 +157,11 @@ async def meow_me(
     # 4. Try the full image pipeline (avatar + image gen + upload)
     image_generated = False
     image_sent = False
+    mode = "text_only"
+    reason = ""
 
-    # Get OpenAI API key from Arcade secrets (cloud) or env var (local)
-    try:
-        openai_key = context.get_secret("OPENAI_API_KEY")
-    except Exception:
-        openai_key = os.getenv("OPENAI_API_KEY", "")
+    # Get OpenAI API key (optional cloud secret)
+    openai_key = _try_get_secret(context, "OPENAI_API_KEY")
 
     if openai_key:
         try:
@@ -149,27 +175,35 @@ async def meow_me(
             image_b64 = _generate_image_openai(avatar_bytes, prompt, openai_key)
             image_generated = True
 
-            # Upload image to DM
+            # Upload image to DM using bot token (has files:write)
+            upload_token = _get_upload_token(context)
             image_bytes = base64.b64decode(image_b64)
-            upload_info = await _get_upload_url(token, "meow_art.png", len(image_bytes))
+            upload_info = await _get_upload_url(upload_token, "meow_art.png", len(image_bytes))
             await _upload_file_bytes(upload_info["upload_url"], image_bytes)
             caption = _format_cat_fact_message(fact)
-            await _complete_upload(token, upload_info["file_id"], dm_channel, caption)
+            await _complete_upload(upload_token, upload_info["file_id"], dm_channel, caption)
             image_sent = True
-        except Exception:
+            mode = "full"
+        except Exception as e:
             # Fallback: send text-only if any step fails
-            pass
+            reason = str(e)
+    else:
+        reason = "OPENAI_API_KEY not available as cloud secret"
 
     # 5. If image wasn't sent, send text-only fact
     if not image_sent:
         message = _format_cat_fact_message(fact)
         await _send_slack_message(token, dm_channel, message)
+        if not reason:
+            reason = "image pipeline failed, sent text-only fallback"
 
     return {
         "success": True,
         "fact": fact,
         "image_generated": image_generated,
         "image_sent": image_sent,
+        "mode": mode,
+        "reason": reason if mode == "text_only" else "",
         "recipient": user_id,
         "channel": dm_channel,
     }
@@ -364,17 +398,21 @@ async def send_cat_image(
 ) -> dict:
     """Upload a cat-themed image with a fact caption to a Slack channel.
 
-    Takes a base64-encoded image (from generate_cat_image) and uploads it
-    to the specified Slack channel using the file upload API.
+    Takes a base64-encoded image (from start_cat_image_generation) and uploads
+    it to the specified Slack channel using the file upload API.
 
     Use image_base64='__last__' (default) to automatically use the image
-    from the most recent generate_cat_image call.
+    from the most recent image generation.
 
-    Note: Requires a Slack token with files:write scope for file uploads.
-    Arcade's built-in Slack OAuth does not support files:write, so this tool
-    falls back to sending the cat fact as text if file upload fails.
+    Capabilities depend on cloud secrets:
+    - SLACK_BOT_TOKEN deployed: Full image upload via files:write scope
+    - No bot token: Falls back to sending the cat fact as text only
+
+    Check 'image_uploaded' in the response to see what happened.
     """
-    token = _get_token(context)
+    # Use bot token for file upload, OAuth for text fallback
+    upload_token = _get_upload_token(context)
+    text_token = _get_token(context)
 
     # Resolve __last__ reference from server-side stash
     if image_base64 == "__last__":
@@ -385,28 +423,29 @@ async def send_cat_image(
             cat_fact = cat_fact or stash.get("cat_fact", "")
         else:
             return {
-                "error": "No image available. Call generate_cat_image first, then call send_cat_image.",
+                "error": "No image available. Call start_cat_image_generation first, then poll check_image_status until complete.",
             }
 
     # Decode image
     image_bytes = base64.b64decode(image_base64)
 
-    # Try file upload (requires files:write scope on the token)
+    # Try file upload (requires files:write scope — available with bot token)
     try:
-        upload_info = await _get_upload_url(token, "meow_art.png", len(image_bytes))
+        upload_info = await _get_upload_url(upload_token, "meow_art.png", len(image_bytes))
         await _upload_file_bytes(upload_info["upload_url"], image_bytes)
         caption = _format_cat_fact_message(cat_fact)
-        await _complete_upload(token, upload_info["file_id"], channel, caption)
+        await _complete_upload(upload_token, upload_info["file_id"], channel, caption)
         return {
             "success": True,
             "channel": channel,
             "file_id": upload_info["file_id"],
             "cat_fact": cat_fact,
+            "image_uploaded": True,
         }
     except Exception as e:
         # Fallback: send text-only if file upload fails (e.g. missing files:write scope)
         message = _format_cat_fact_message(cat_fact)
-        await _send_slack_message(token, channel, message)
+        await _send_slack_message(text_token, channel, message)
         return {
             "success": True,
             "channel": channel,

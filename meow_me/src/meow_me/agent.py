@@ -7,7 +7,6 @@ there is no hardcoded orchestration logic in the agent itself.
 
 Usage:
     uv run python -m meow_me              # Interactive agent (requires OPENAI_API_KEY + ARCADE_API_KEY)
-    uv run python -m meow_me --slack      # Pass SLACK_BOT_TOKEN to tools (all features)
     uv run python -m meow_me --demo       # Scripted demo (no API keys needed)
 
 For MCP server mode (used by Claude Desktop, Cursor, etc.):
@@ -33,13 +32,13 @@ You are Meow Art, a fun and friendly agent that creates cat-fact-inspired art \
 and sends it via Slack.
 
 TOOLS AVAILABLE (provided by Arcade-deployed MCP server):
-- MeowMe_GetCatFact(count)                          — Fetch 1-5 random cat facts (always works)
-- MeowMe_GetUserAvatar()                            — Get your Slack avatar URL (needs Slack auth)
-- MeowMe_GenerateCatImage(cat_fact, avatar_url, style) — Create stylized art from avatar + fact (needs OPENAI_API_KEY)
-- MeowMe_SendCatFact(channel, count)                — Send text fact(s) to a Slack channel (needs Slack auth)
-- MeowMe_SendCatImage(cat_fact, channel, image_base64) — Upload image + caption to Slack (needs Slack auth)
-- MeowMe_SaveImageLocally(image_base64, cat_fact)   — Save generated image to local file (no auth needed)
-- MeowMe_MeowMe()                                   — One-shot: fact + avatar + image + DM self (needs Slack auth + OPENAI_API_KEY)
+- MeowMe_GetCatFact(count)                                    — Fetch 1-5 random cat facts (always works)
+- MeowMe_GetUserAvatar()                                      — Get your Slack avatar URL (needs Slack auth)
+- MeowMe_StartCatImageGeneration(cat_fact, avatar_url, style)  — Start async image generation (returns job_id)
+- MeowMe_CheckImageStatus(job_id)                             — Poll image generation status (~30-60s total)
+- MeowMe_SendCatFact(channel, count)                          — Send text fact(s) to a Slack channel (needs Slack auth)
+- MeowMe_SendCatImage(cat_fact, channel, image_base64)        — Upload image to Slack (needs files:write)
+- MeowMe_MeowMe()                                             — One-shot: fact + image attempt + DM self (needs Slack auth)
 
 ROUTING RULES:
 
@@ -57,7 +56,9 @@ ROUTING RULES:
       (call MeowMe_GetCatFact again) until they're happy.
    b. DELIVERY PHASE: Ask "with image or just text?"
       - Text only → ask where to send → MeowMe_SendCatFact(channel)
-      - With image → MeowMe_GetUserAvatar → MeowMe_GenerateCatImage → ask where → MeowMe_SendCatImage(channel)
+      - With image → MeowMe_GetUserAvatar → MeowMe_StartCatImageGeneration →
+        poll MeowMe_CheckImageStatus every ~10 seconds until 'complete' or 'failed' →
+        MeowMe_SendCatImage(channel)
       - Display only (no send) → just show the fact/image in chat
 
 3. If the user says "another" / "new one" / "different fact" → call MeowMe_GetCatFact again.
@@ -67,123 +68,25 @@ ROUTING RULES:
 5. If the user just says "tell me a fact" with no send intent, display the fact
    and offer: another fact, an image, or send it somewhere.
 
-6. When Slack is NOT available:
-   - "Meow me" → MeowMe_GetCatFact → MeowMe_GenerateCatImage → MeowMe_SaveImageLocally (display path)
-   - Skip MeowMe_SendCatFact, MeowMe_SendCatImage, MeowMe_MeowMe, MeowMe_GetUserAvatar entirely.
-   - For MeowMe_GenerateCatImage without an avatar, use a placeholder URL like
-     "https://placecats.com/512/512" as the avatar_url.
+6. IMAGE GENERATION IS ASYNC: After calling MeowMe_StartCatImageGeneration,
+   you MUST poll MeowMe_CheckImageStatus with the returned job_id every ~10 seconds.
+   Tell the user "Generating your cat art... this takes about 30-60 seconds."
+   When status is 'complete', call MeowMe_SendCatImage with image_base64='__last__'.
 
-7. After MeowMe_GenerateCatImage, always call MeowMe_SaveImageLocally() to save the image
-   to a local file so the user can view it. It automatically uses the last generated image.
+HANDLING TOOL RESPONSES:
+- If MeowMe_MeowMe returns image_sent=false, tell the user: "I sent you a text
+  cat fact! Image features aren't available right now."
+- If MeowMe_CheckImageStatus returns status='failed', explain the error and offer
+  to send a text-only fact instead.
+- If MeowMe_SendCatImage returns image_uploaded=false, explain that the image
+  couldn't be uploaded and a text fact was sent instead.
+- Never tell the user about internal details like "cloud secrets" or "SLACK_BOT_TOKEN".
+  Instead say "image features aren't available right now" or "I'll send you a text
+  version instead."
 
 Be concise, fun, and cat-themed in your responses. Use cat emoji sparingly.
 If a tool fails because of missing auth, explain what's needed and suggest alternatives.
 """
-
-
-# ---------------------------------------------------------------------------
-# --slack mode: user resolution (bot tokens need manual user identification)
-# ---------------------------------------------------------------------------
-
-_slack_config: dict = {"use_direct_token": False}
-
-
-async def _fetch_slack_users(token: str) -> list[dict]:
-    """Fetch all non-bot, non-deleted workspace members via users.list (paginated)."""
-    import httpx
-
-    users: list[dict] = []
-    cursor = ""
-    async with httpx.AsyncClient() as client:
-        while True:
-            params: dict = {"limit": "200"}
-            if cursor:
-                params["cursor"] = cursor
-            resp = await client.get(
-                "https://slack.com/api/users.list",
-                headers={"Authorization": f"Bearer {token}"},
-                params=params,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if not data.get("ok"):
-                raise RuntimeError(f"Slack users.list failed: {data.get('error', 'unknown')}")
-            for member in data.get("members", []):
-                if member.get("is_bot") or member.get("deleted") or member.get("id") == "USLACKBOT":
-                    continue
-                users.append(member)
-            cursor = data.get("response_metadata", {}).get("next_cursor", "")
-            if not cursor:
-                break
-    return users
-
-
-def _match_users(users: list[dict], query: str) -> list[dict]:
-    """Find workspace members matching a query (case-insensitive).
-
-    Matches against name (handle), display_name, and real_name.
-    """
-    q = query.lower().lstrip("@")
-    matches = []
-    for user in users:
-        name = (user.get("name") or "").lower()
-        profile = user.get("profile", {})
-        display = (profile.get("display_name") or "").lower()
-        real = (profile.get("real_name") or "").lower()
-        if q in (name, display, real) or q in name or q in display or q in real:
-            matches.append(user)
-    return matches
-
-
-async def _resolve_human_user(token: str) -> dict:
-    """Prompt for Slack username, look up via users.list, cache the result.
-
-    Returns {"user_id": ..., "display_name": ...} and stores in _slack_config.
-    """
-    print("  Resolving your Slack identity...", flush=True)
-    users = await _fetch_slack_users(token)
-
-    for attempt in range(3):
-        query = input("  Enter your Slack username or display name: ").strip()
-        if not query:
-            print("  Please enter a name.", flush=True)
-            continue
-
-        matches = _match_users(users, query)
-
-        if len(matches) == 1:
-            user = matches[0]
-            profile = user.get("profile", {})
-            display = profile.get("display_name") or profile.get("real_name") or user.get("name", "")
-            _slack_config["target_user_id"] = user["id"]
-            _slack_config["target_display_name"] = display
-            return {"user_id": user["id"], "display_name": display}
-
-        if len(matches) > 1:
-            print(f"  Found {len(matches)} matches:", flush=True)
-            for i, user in enumerate(matches[:10], 1):
-                profile = user.get("profile", {})
-                display = profile.get("display_name") or profile.get("real_name") or ""
-                handle = user.get("name", "")
-                print(f"    {i}. @{handle} ({display}) [{user['id']}]", flush=True)
-            try:
-                choice = int(input("  Enter number: ").strip()) - 1
-                if 0 <= choice < len(matches[:10]):
-                    user = matches[choice]
-                    profile = user.get("profile", {})
-                    display = profile.get("display_name") or profile.get("real_name") or user.get("name", "")
-                    _slack_config["target_user_id"] = user["id"]
-                    _slack_config["target_display_name"] = display
-                    return {"user_id": user["id"], "display_name": display}
-            except (ValueError, EOFError):
-                pass
-            print("  Invalid selection, try again.", flush=True)
-            continue
-
-        print(f"  No users found matching '{query}'. Try again.", flush=True)
-
-    print("  Could not resolve Slack user after 3 attempts.", flush=True)
-    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -192,38 +95,30 @@ async def _resolve_human_user(token: str) -> dict:
 
 
 def _detect_capabilities() -> dict:
-    """Detect which API capabilities are available based on env vars and CLI flags."""
-    has_slack_token = _slack_config["use_direct_token"] and bool(os.getenv("SLACK_BOT_TOKEN"))
-    has_arcade_key = bool(os.getenv("ARCADE_API_KEY"))
+    """Detect which API capabilities are available based on env vars."""
     return {
-        "openai": bool(os.getenv("OPENAI_API_KEY")),
-        "slack": has_slack_token,
-        "arcade": has_arcade_key,
-        "slack_available": has_slack_token or has_arcade_key,
+        "arcade": bool(os.getenv("ARCADE_API_KEY")),
     }
 
 
 def _build_capability_prompt(caps: dict) -> str:
     """Build an addendum to the system prompt based on available capabilities."""
     lines = ["\nCURRENT SESSION CAPABILITIES:"]
-    if caps.get("slack"):
-        lines.append("- Slack: CONNECTED (SLACK_BOT_TOKEN via --slack flag)")
-    elif caps.get("arcade"):
-        lines.append("- Slack: AVAILABLE via Arcade OAuth (text messaging + avatars)")
-        lines.append("  -> MeowMe_SendCatFact, MeowMe_GetUserAvatar, MeowMe_MeowMe (text-only) work.")
-        lines.append("  -> MeowMe_SendCatImage does NOT work (Arcade doesn't support files:write scope).")
-        lines.append("  -> For images: MeowMe_GenerateCatImage + MeowMe_SaveImageLocally (saves to disk).")
+    if caps.get("arcade"):
+        lines.append("- Arcade: CONNECTED — text tools are available (GetCatFact, SendCatFact, MeowMe)")
+        lines.append("- Slack: READY via Arcade OAuth")
+        lines.append("- Image generation: NOT AVAILABLE in this mode")
+        lines.append("  -> Image generation requires MCP server mode (long-running local process).")
+        lines.append("  -> Arcade Cloud uses ephemeral workers, so the async start/poll pattern cannot work.")
+        lines.append("  -> For image generation, use Claude Desktop or Cursor with the MCP server.")
+        lines.append("  -> Do NOT call MeowMe_StartCatImageGeneration or MeowMe_CheckImageStatus.")
+        lines.append("  -> MeowMe_MeowMe will still work but will fall back to text-only DMs.")
     else:
-        lines.append("- Slack: NOT AVAILABLE (use --slack flag or set ARCADE_API_KEY)")
-        lines.append("  -> Do NOT call MeowMe_MeowMe, MeowMe_SendCatFact, MeowMe_SendCatImage, or MeowMe_GetUserAvatar.")
-        lines.append("  -> Instead: display facts in chat, generate images and save locally.")
-    if caps.get("openai"):
-        lines.append("- Image generation: AVAILABLE (OPENAI_API_KEY set)")
-    else:
-        lines.append("- Image generation: NOT AVAILABLE (no OPENAI_API_KEY)")
-        lines.append("  -> Do NOT call MeowMe_GenerateCatImage. Stick to text facts.")
+        lines.append("- Arcade: NOT CONNECTED (set ARCADE_API_KEY)")
+        lines.append("  -> No tools are available. Can only chat.")
     lines.append("")
-    lines.append("Adapt your behavior to what's available. Be upfront about limitations.")
+    lines.append("Use the tools that are available. If the user asks for image generation,")
+    lines.append("explain that it requires MCP server mode (Claude Desktop or Cursor) and offer text alternatives.")
     return "\n".join(lines)
 
 
@@ -261,20 +156,12 @@ async def run_agent() -> None:
             print("  No email provided. Arcade tools require authentication.")
             sys.exit(1)
 
-    # Handle --slack mode: resolve human user for bot token
-    if caps["slack"]:
-        slack_token = os.getenv("SLACK_BOT_TOKEN", "")
-        print("  Slack:  connected (direct token via --slack)", flush=True)
-        target = await _resolve_human_user(slack_token)
-        print(f"  User:   {target['display_name']} ({target['user_id']})", flush=True)
-    elif caps["arcade"]:
+    if caps["arcade"]:
+        print("  Arcade: connected (text tools available)", flush=True)
         print("  Slack:  available via Arcade OAuth", flush=True)
+        print("  Images: MCP server mode only (use Claude Desktop/Cursor)", flush=True)
     else:
-        print("  Slack:  not connected (use --slack flag, or set ARCADE_API_KEY)")
-    if caps["openai"]:
-        print("  Images: enabled")
-    else:
-        print("  Images: disabled (set OPENAI_API_KEY for image generation)")
+        print("  Arcade: not connected (set ARCADE_API_KEY)")
     print()
 
     # Connect to Arcade-deployed tools via SDK
@@ -289,14 +176,6 @@ async def run_agent() -> None:
 
     # Build system prompt with capabilities
     instructions = SYSTEM_PROMPT + _build_capability_prompt(caps)
-
-    # If --slack mode with a resolved user, inform the LLM
-    if _slack_config.get("target_user_id"):
-        instructions += (
-            f"\nSLACK USER CONTEXT: The user's Slack ID is {_slack_config['target_user_id']} "
-            f"(display name: {_slack_config.get('target_display_name', 'unknown')}). "
-            f"Use this when tools need a user_id parameter."
-        )
 
     agent = Agent(
         name="Meow Art",
@@ -370,9 +249,7 @@ def run_demo() -> None:
     print("    [2] conversations.open -> dm_channel: D0123456789")
     print(f"    [3] Fetched fact: \"{DEMO_FACTS[0]}\"")
     print("    [4] users.info -> avatar: https://avatars.slack-edge.com/.../image_512.png")
-    print("    [5] MeowMe_GenerateCatImage(fact, avatar, style='cartoon')")
-    print("        -> Prompt: 'Transform this photo into a whimsical cartoon...'")
-    print("        -> Generated 1024x1024 PNG image")
+    print("    [5] Generating cat-themed art from avatar...")
     print("    [6] files.getUploadURLExternal -> upload_url")
     print("    [7] Uploaded image bytes")
     print("    [8] files.completeUploadExternal -> shared to DM")
@@ -409,9 +286,9 @@ def run_demo() -> None:
     print(f"    Sent to #general: :cat: *Meow Fact:*")
     print(f"    {DEMO_FACTS[2]}")
 
-    # Scenario 3: Image pipeline
+    # Scenario 3: Image pipeline (async start/poll)
     print("\n" + "-" * 60)
-    print("SCENARIO 3: Cat art -> image pipeline -> #random")
+    print("SCENARIO 3: Cat art -> async image pipeline -> #random")
     print("-" * 60)
     print()
     print("  User: Make me cat art")
@@ -424,8 +301,18 @@ def run_demo() -> None:
     print()
     print("  Agent: Calling MeowMe_GetUserAvatar()...")
     print("    -> avatar_url: https://avatars.slack-edge.com/.../image_512.png")
-    print(f"  Agent: Calling MeowMe_GenerateCatImage(fact, avatar, style='cartoon')...")
-    print("    -> Generated 1024x1024 cat-themed art!")
+    print(f"  Agent: Calling MeowMe_StartCatImageGeneration(fact, avatar, style='cartoon')...")
+    print("    -> job_id: a1b2c3d4, status: generating")
+    print("    Generating your cat art... this takes about 30-60 seconds.")
+    print()
+    print("  Agent: Calling MeowMe_CheckImageStatus(job_id='a1b2c3d4')...")
+    print("    -> status: generating (poll again in ~10s)")
+    print()
+    print("  Agent: Calling MeowMe_CheckImageStatus(job_id='a1b2c3d4')...")
+    print("    -> status: generating (poll again in ~10s)")
+    print()
+    print("  Agent: Calling MeowMe_CheckImageStatus(job_id='a1b2c3d4')...")
+    print("    -> status: complete! 1024x1024 cat-themed art ready")
     print("    Where should I send it?")
     print()
     print("  User: #random")
@@ -460,13 +347,13 @@ def run_demo() -> None:
     print("  DEMO COMPLETE")
     print()
     print("  Tools demonstrated (called via Arcade SDK):")
-    print("    - MeowMe_GetCatFact      (fetch random facts)")
-    print("    - MeowMe_GetUserAvatar   (Slack avatar retrieval)")
-    print("    - MeowMe_GenerateCatImage (OpenAI gpt-image-1 art)")
-    print("    - MeowMe_SendCatFact      (text to Slack channel)")
-    print("    - MeowMe_SendCatImage     (image upload to Slack)")
-    print("    - MeowMe_SaveImageLocally (save image to local file)")
-    print("    - MeowMe_MeowMe          (one-shot full pipeline)")
+    print("    - MeowMe_GetCatFact            (fetch random facts)")
+    print("    - MeowMe_GetUserAvatar         (Slack avatar retrieval)")
+    print("    - MeowMe_StartCatImageGeneration (async image generation)")
+    print("    - MeowMe_CheckImageStatus      (poll generation status)")
+    print("    - MeowMe_SendCatFact           (text to Slack channel)")
+    print("    - MeowMe_SendCatImage          (image upload to Slack)")
+    print("    - MeowMe_MeowMe               (one-shot full pipeline)")
     print()
     print("  To run the live agent:")
     print("    OPENAI_API_KEY=sk-... ARCADE_API_KEY=arc-... uv run python -m meow_me")
@@ -493,23 +380,12 @@ def main() -> None:
         action="store_true",
         help="Run scripted demo mode (no API keys needed)",
     )
-    parser.add_argument(
-        "--slack",
-        action="store_true",
-        help="Use SLACK_BOT_TOKEN from .env (enables all Slack features incl. image upload)",
-    )
 
     args = parser.parse_args()
 
     if args.demo:
         run_demo()
     elif os.getenv("OPENAI_API_KEY"):
-        if args.slack:
-            if not os.getenv("SLACK_BOT_TOKEN"):
-                print("\nError: --slack flag requires SLACK_BOT_TOKEN in .env")
-                print("See .env.example for setup instructions.\n")
-                sys.exit(1)
-            _slack_config["use_direct_token"] = True
         if not os.getenv("ARCADE_API_KEY"):
             print("\nError: ARCADE_API_KEY is required to connect to Arcade-deployed tools.")
             print("Sign up at https://api.arcade.dev and set ARCADE_API_KEY in .env\n")
@@ -522,13 +398,10 @@ def main() -> None:
         print("  1. Set OPENAI_API_KEY + ARCADE_API_KEY and run the interactive agent:")
         print("     uv run python -m meow_me")
         print()
-        print("  2. With Slack bot token (all features incl. image upload):")
-        print("     uv run python -m meow_me --slack")
-        print()
-        print("  3. Run the scripted demo (no keys needed):")
+        print("  2. Run the scripted demo (no keys needed):")
         print("     uv run python -m meow_me --demo")
         print()
-        print("  4. Run as MCP server (for Claude Desktop / Cursor):")
+        print("  3. Run as MCP server (for Claude Desktop / Cursor):")
         print("     uv run arcade mcp -p meow_me stdio")
         print()
         sys.exit(1)

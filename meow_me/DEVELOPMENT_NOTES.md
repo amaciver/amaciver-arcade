@@ -802,3 +802,135 @@ Test count decreased from 138 to 128 because the 7 `@function_tool` wrappers and
 - **[arcadepy](https://github.com/ArcadeAI/arcade-py)** — Arcade Python SDK (remote tool execution via `AsyncArcade`)
 - **[arcade deploy](https://docs.arcade.dev)** — Cloud deployment of MCP tools
 
+---
+
+## Session 8: Cloud-First Optimization (Async Image Gen, Fallback Modes, Cleanup)
+
+**Focus:** Make cloud-deployed tools reliable by adding async image generation, graceful degradation when secrets are missing, and removing obsolete local-only code paths.
+
+### Problem Statement
+
+After Session 7's separation of agent from tools via Arcade SDK, three issues remained:
+
+1. **Image generation times out on Arcade Cloud** — `gpt-image-1` takes 30-60s but Arcade Engine has a ~30s worker timeout
+2. **`--slack` flag and local SLACK_BOT_TOKEN are obsolete** — Arcade is a token broker (no credential passthrough); bot token must be a cloud secret
+3. **`save_image_locally` is broken on cloud** — Saves to ephemeral worker filesystem; `_image_to_ascii()` doesn't exist
+
+### Architecture Changes
+
+#### 1. Async Start/Poll Pattern for Image Generation
+
+Split `generate_cat_image` (single 30-60s call) into two fast tools:
+
+- **`start_cat_image_generation`** (~5s): Downloads avatar, starts OpenAI generation in a background `threading.Thread`, returns `job_id` immediately
+- **`check_image_status`**: Polls the in-memory `_pending_jobs` dict; returns `generating`, `complete`, or `failed`
+
+This works because the MCP server is a long-running process — the background thread persists between tool calls. On Arcade Cloud (ephemeral workers), each call is a fresh process so the background thread is lost. This is documented as a known limitation — the async flow works best in MCP server mode.
+
+#### 2. Dual-Token Pattern (OAuth + Bot Token)
+
+Replaced the `--slack` flag with a cloud-native dual-token architecture:
+
+- **OAuth token** (via `requires_auth=Slack(...)`) — Always available via Arcade OAuth. `auth.test` returns the **human user's ID** (not bot). Used for identity, DMs, and text messaging.
+- **Bot token** (via `context.get_secret("SLACK_BOT_TOKEN")`) — Optional cloud secret. Used only for `files:write` operations (image uploads).
+
+Key insight: OAuth always identifies the human user → `_resolve_human_user` is no longer needed.
+
+```python
+def _get_token(context):       # OAuth — identity & messaging
+def _get_upload_token(context): # Bot token (if available) — file uploads
+def _try_get_secret(context, name): # Optional secret with env fallback
+```
+
+#### 3. Three-Layer Agent Awareness of Degraded Capabilities
+
+Tools gracefully degrade when optional secrets are missing. The agent learns about this through:
+
+1. **Tool return values** — Structured fields: `image_generated`, `image_sent`, `mode`, `reason`, `fallback_reason`
+2. **Tool docstrings** — Document capability-dependent behavior visible during tool discovery
+3. **System prompt** — `HANDLING TOOL RESPONSES` section tells the LLM how to communicate failures to users
+
+#### 4. Removed Obsolete Code
+
+- **`--slack` flag** — No longer exists; OAuth handles identity
+- **`save_image_locally`** — Broken on cloud, removed entirely
+- **`generate_cat_image`** — Replaced by async start/poll pair
+- **`_resolve_human_user`** — OAuth provides human identity
+- **`_fetch_slack_users`**, **`_match_users`**, **`_slack_config`** — All part of the removed `--slack` flow
+
+### Gotchas
+
+34. **`requires_secrets` prevents tool execution when secret is missing**: If a tool has `@tool(requires_secrets=["KEY"])`, Arcade won't execute it unless the secret is available. For optional secrets (like OPENAI_API_KEY on `meow_me`), remove `requires_secrets` from the decorator and use `_try_get_secret()` at runtime instead. This allows the tool to run and degrade gracefully.
+
+35. **OAuth `auth.test` returns human identity**: When a user authorizes via Arcade OAuth, the token belongs to the human. `auth.test` returns their user ID, not a bot ID. This eliminates the need for `_resolve_human_user` — the OAuth flow inherently identifies who the user is.
+
+36. **Dual-token separation is essential for file uploads**: Arcade's Slack OAuth provider doesn't support `files:write`. File uploads require a bot token deployed as a cloud secret. The `_get_upload_token()` helper tries the bot token first, falls back to OAuth (which will fail gracefully on `files:write`).
+
+37. **Background threads in MCP server vs Arcade Cloud**: `threading.Thread` works in MCP server mode (long-running process) but not on Arcade Cloud (ephemeral workers). The async start/poll pattern is designed for MCP server mode. On Arcade Cloud, `meow_me` attempts the full pipeline synchronously and falls back to text-only if it times out.
+
+### Test Coverage (Session 8)
+
+**Pytest (136 unit tests):**
+```
+tests/test_facts.py   - 11 tests (unchanged)
+tests/test_avatar.py  - 13 tests (unchanged)
+tests/test_slack.py   - 43 tests (up from 34: added _try_get_secret, _get_token, _get_upload_token)
+tests/test_image.py   - 31 tests (rewritten: removed generate/save, added start/check/try_get_secret)
+tests/test_agent.py   - 30 tests (rewritten: removed --slack tests, added async flow tests)
+tests/test_evals.py   -  8 tests (unchanged)
+Total: 136 tests, all passing
+```
+
+Test count changed from 128 to 136. The removed `generate_cat_image`/`save_image_locally`/`--slack` tests were replaced by more comprehensive async start/poll and dual-token tests.
+
+**Arcade Evaluations (12 cases across 2 suites):** Updated tool name references (`MeowMe_GenerateCatImage` → `MeowMe_StartCatImageGeneration`).
+
+**Total Test Coverage: 148 test cases (136 unit + 12 behavioral)**
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `tools/image.py` | Replaced `generate_cat_image` + `save_image_locally` with `start_cat_image_generation` + `check_image_status`. Added `_pending_jobs`, `_run_generation`, `_try_get_secret`. |
+| `tools/slack.py` | Added `_try_get_secret`, `_get_upload_token`. Removed `requires_secrets` from `meow_me`. Dual-token pattern for uploads. |
+| `server.py` | Updated tool imports and `app.add_tool()` registrations. |
+| `agent.py` | Removed `--slack` flag, `_slack_config`, `_resolve_human_user`, `_fetch_slack_users`, `_match_users`. Simplified capabilities. Updated system prompt and demo. 538 → ~280 lines. |
+| `tests/test_agent.py` | Removed --slack/user resolution tests. Added async flow and capability tests. 31 → 30 tests. |
+| `tests/test_image.py` | Removed generate/save tests. Added start/check/try_get_secret tests. 31 → 31 tests. |
+| `tests/test_slack.py` | Added `_try_get_secret`, `_get_token`, `_get_upload_token` tests. 34 → 43 tests. |
+| `evals/eval_meow_me.py` | Updated tool name references. |
+| `CLAUDE.md` | Updated auth model, tool names, removed --slack references. |
+| `README.md` | Updated tool table, architecture, removed --slack docs. |
+
+### Key Learnings Table
+
+| # | Gotcha | Where It Bit | Resolution | Docs |
+|---|--------|-------------|-----------|------|
+| 34 | `requires_secrets` prevents execution when missing | `meow_me` wouldn't run without OPENAI_API_KEY | Remove from decorator, use `_try_get_secret()` at runtime | [Arcade Docs](https://docs.arcade.dev) |
+| 35 | OAuth `auth.test` returns human identity | `_resolve_human_user` was unnecessary complexity | Removed — OAuth inherently identifies the human user | [Slack API](https://api.slack.com/methods/auth.test) |
+| 36 | Dual-token separation for file uploads | OAuth lacks `files:write` scope | `_get_upload_token()` prefers bot token, falls back to OAuth | [Arcade Docs](https://docs.arcade.dev) |
+| 37 | Background threads don't persist on Arcade Cloud | Async start/poll only works in MCP server mode | Document as known limitation; `meow_me` falls back to text-only | — |
+| 38 | Local capability detection gates cloud features | Agent checked `os.getenv("OPENAI_API_KEY")` locally, told LLM "NOT AVAILABLE" | Remove local env checks for cloud secrets; agent assumes all tools available | — |
+| 39 | LLM preemptively refuses tools with wishy-washy prompts | "Available via cloud secrets (tools detect at runtime)" → LLM says "not available" | Use assertive language or explicit "Do NOT call" — no middle ground | — |
+| 40 | `arcade deploy --skip-validate` needs `--server-name` and `--server-version` | Deploy fails without `--skip-validate` (server verification timeout) | Pass `--skip-validate --server-name meow_me --server-version 0.1.0` | — |
+| 41 | Ephemeral workers kill async start/poll on Arcade Cloud | `check_image_status` returns 503 because `_pending_jobs` is empty on new worker | Image gen is MCP server mode only; agent tells users to use Claude Desktop/Cursor | — |
+
+### Post-Deploy Testing Addendum
+
+After deploying to Arcade Cloud and running the CLI agent against cloud tools, several issues surfaced that required immediate fixes:
+
+**Issue 1: Agent refused to call image tools**
+The `_detect_capabilities()` function checked `os.getenv("OPENAI_API_KEY")` locally. Since the key is a cloud secret (not in the agent's local `.env`), the capability prompt told the LLM "Image generation: NOT AVAILABLE — Do NOT call MeowMe_StartCatImageGeneration." Fix: removed local OpenAI key detection entirely.
+
+**Issue 2: LLM still refused after fix**
+Even after removing the gating, the capability prompt said "Available via cloud secrets (tools detect at runtime)" — gpt-4o-mini interpreted this as uncertain and preemptively told users "image features aren't available." Fix: the prompt needed to be either firmly "READY" or firmly "Do NOT call" — ambiguous language caused the LLM to hedge.
+
+**Issue 3: `check_image_status` returns 503 on Arcade Cloud**
+The async start/poll pattern fundamentally cannot work on Arcade Cloud. `start_cat_image_generation` starts a background thread on Worker A, but `check_image_status` runs on Worker B (fresh process) where `_pending_jobs` is empty. The job_id doesn't exist → 503 error. This is an inherent limitation of ephemeral workers, not a bug.
+
+**Resolution: Two runtime modes**
+- **MCP Server Mode** (Claude Desktop, Cursor): Full features. Long-running process, background threads persist, async start/poll works. Recommended for image generation.
+- **CLI Agent Mode** (Arcade Cloud): Text-only. Agent capability prompt explicitly tells the LLM not to call image generation tools and to suggest MCP server mode instead.
+
+Updated test count: 137 (added `test_meow_me_falls_back_to_text`).
+

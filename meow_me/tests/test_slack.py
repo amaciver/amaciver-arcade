@@ -9,6 +9,9 @@ from meow_me.tools.slack import (
     _format_cat_fact_message,
     _fetch_one_fact,
     _get_own_user_id,
+    _get_token,
+    _get_upload_token,
+    _try_get_secret,
     _open_dm_channel,
     _send_slack_message,
     _resolve_channel_id,
@@ -561,3 +564,72 @@ class TestEnsureBotInChannel:
     async def test_skips_empty_channel(self):
         """Empty channel string should be a no-op."""
         await _ensure_bot_in_channel("xoxb-token", "")
+
+
+# --- Tests for _try_get_secret ---
+
+class TestTryGetSecret:
+    def test_returns_secret_from_context(self):
+        ctx = MagicMock()
+        ctx.get_secret = MagicMock(return_value="secret-value")
+        assert _try_get_secret(ctx, "MY_SECRET") == "secret-value"
+
+    def test_falls_back_to_env_var(self):
+        ctx = MagicMock()
+        ctx.get_secret = MagicMock(side_effect=ValueError("not found"))
+        with patch.dict("os.environ", {"MY_SECRET": "env-value"}, clear=True):
+            assert _try_get_secret(ctx, "MY_SECRET") == "env-value"
+
+    def test_returns_empty_when_not_available(self):
+        ctx = MagicMock()
+        ctx.get_secret = MagicMock(side_effect=ValueError("not found"))
+        with patch.dict("os.environ", {}, clear=True):
+            assert _try_get_secret(ctx, "MY_SECRET") == ""
+
+
+# --- Tests for _get_token ---
+
+class TestGetToken:
+    def test_returns_oauth_token(self):
+        ctx = MagicMock()
+        ctx.get_auth_token_or_empty = MagicMock(return_value="xoxp-oauth")
+        assert _get_token(ctx) == "xoxp-oauth"
+
+    def test_falls_back_to_env_var(self):
+        ctx = MagicMock()
+        ctx.get_auth_token_or_empty = MagicMock(return_value="")
+        with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-env"}, clear=True):
+            assert _get_token(ctx) == "xoxb-env"
+
+    def test_returns_empty_when_nothing_available(self):
+        ctx = MagicMock()
+        ctx.get_auth_token_or_empty = MagicMock(return_value="")
+        with patch.dict("os.environ", {}, clear=True):
+            assert _get_token(ctx) == ""
+
+
+# --- Tests for _get_upload_token ---
+
+class TestGetUploadToken:
+    def test_prefers_bot_token_secret(self):
+        ctx = MagicMock()
+        ctx.get_auth_token_or_empty = MagicMock(return_value="xoxp-oauth")
+        ctx.get_secret = MagicMock(return_value="xoxb-bot-secret")
+        assert _get_upload_token(ctx) == "xoxb-bot-secret"
+
+    def test_falls_back_to_oauth_when_no_bot_secret(self):
+        ctx = MagicMock()
+        ctx.get_auth_token_or_empty = MagicMock(return_value="xoxp-oauth")
+        ctx.get_secret = MagicMock(side_effect=ValueError("not found"))
+        with patch.dict("os.environ", {}, clear=True):
+            assert _get_upload_token(ctx) == "xoxp-oauth"
+
+    def test_falls_back_to_env_bot_token(self):
+        ctx = MagicMock()
+        ctx.get_auth_token_or_empty = MagicMock(return_value="")
+        ctx.get_secret = MagicMock(side_effect=ValueError("not found"))
+        with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-env"}, clear=True):
+            # _try_get_secret for SLACK_BOT_TOKEN falls back to env
+            # But since it's checking env, it gets the bot token
+            result = _get_upload_token(ctx)
+            assert result == "xoxb-env"

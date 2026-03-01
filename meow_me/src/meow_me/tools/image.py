@@ -1,13 +1,16 @@
-"""Image generation tools - create cat-themed art from avatars using OpenAI."""
+"""Image generation tools - create cat-themed art from avatars using OpenAI.
 
-import asyncio
+Provides an async start/poll pattern for image generation:
+- start_cat_image_generation: kicks off generation, returns job_id immediately
+- check_image_status: polls for completion, stashes result for send_cat_image
+"""
+
 import base64
-import hashlib
 import io
 import logging
 import os
-import pathlib
-import tempfile
+import threading
+import uuid
 from typing import Annotated
 
 import httpx
@@ -118,26 +121,52 @@ def get_last_generated_image() -> dict:
     return _last_generated_image
 
 
+# ---------------------------------------------------------------------------
+# Async image generation: pending jobs tracked in-memory
+# ---------------------------------------------------------------------------
+
+_pending_jobs: dict[str, dict] = {}
+
+
+def _run_generation(job_id: str, avatar_bytes: bytes, prompt: str, api_key: str) -> None:
+    """Background thread: run OpenAI image generation and store result."""
+    try:
+        result = _generate_image_openai(avatar_bytes, prompt, api_key)
+        _pending_jobs[job_id]["result"] = result
+    except Exception as e:
+        _pending_jobs[job_id]["error"] = str(e)
+
+
+def _try_get_secret(context: Context, name: str) -> str:
+    """Try to get a cloud secret, return empty string if not available."""
+    try:
+        return context.get_secret(name)
+    except Exception:
+        return os.getenv(name, "")
+
+
 @tool(requires_secrets=["OPENAI_API_KEY"])
-async def generate_cat_image(
+async def start_cat_image_generation(
     context: Context,
     cat_fact: Annotated[str, "The cat fact to incorporate into the image. Call get_cat_fact first to get one."],
     avatar_url: Annotated[str, "Full HTTPS URL of the user's avatar image. Call get_user_avatar first to get this URL."],
     style: Annotated[str, "Art style: cartoon, watercolor, anime, or photorealistic"] = "cartoon",
 ) -> dict:
-    """Generate a cat-themed image by transforming a user's avatar.
+    """Start generating a cat-themed image asynchronously.
+
+    Returns a job_id immediately (~5 seconds). Image generation takes 30-60
+    seconds in the background. Poll check_image_status(job_id) every ~10
+    seconds until status is 'complete' or 'failed'.
 
     IMPORTANT: Before calling this tool, you must first call:
     1. get_user_avatar - to get the avatar_url
     2. get_cat_fact - to get a cat_fact
 
-    Then pass the avatar_url string and cat_fact string to this tool.
-
-    The generated image is stored server-side. To send it to Slack, call
-    send_cat_image with image_base64 set to '__last__'.
+    When complete, the image is stashed server-side. Call send_cat_image
+    with image_base64='__last__' to send it to Slack.
     """
     logger.debug(
-        "generate_cat_image called: cat_fact=%r, avatar_url=%r, style=%r",
+        "start_cat_image_generation called: cat_fact=%r, avatar_url=%r, style=%r",
         cat_fact, avatar_url, style,
     )
 
@@ -166,10 +195,7 @@ async def generate_cat_image(
     prompt = _compose_prompt(cat_fact, style)
 
     # Get OpenAI API key from Arcade secrets (cloud) or env var (local)
-    try:
-        openai_key = context.get_secret("OPENAI_API_KEY")
-    except Exception:
-        openai_key = os.getenv("OPENAI_API_KEY", "")
+    openai_key = _try_get_secret(context, "OPENAI_API_KEY")
     if not openai_key:
         logger.error("OPENAI_API_KEY not available")
         return {
@@ -180,7 +206,7 @@ async def generate_cat_image(
         }
 
     try:
-        # Download avatar
+        # Download avatar (fast, <5s)
         logger.debug("Downloading avatar from %s", avatar_url)
         avatar_bytes = await _download_avatar(avatar_url)
         logger.debug("Avatar downloaded: %d bytes", len(avatar_bytes))
@@ -192,28 +218,77 @@ async def generate_cat_image(
             "cat_fact": cat_fact,
         }
 
-    try:
-        # Generate image (sync call, run in thread to avoid blocking event loop)
-        logger.debug("Calling OpenAI image generation...")
-        image_b64 = await asyncio.to_thread(_generate_image_openai, avatar_bytes, prompt, openai_key)
-        logger.debug("Image generated: %d bytes base64", len(image_b64))
-    except Exception as e:
-        logger.error("Image generation failed: %s", e)
+    # Start image generation in background thread
+    job_id = str(uuid.uuid4())[:8]
+    _pending_jobs[job_id] = {
+        "cat_fact": cat_fact,
+        "style": style,
+        "prompt": prompt,
+    }
+    t = threading.Thread(
+        target=_run_generation,
+        args=(job_id, avatar_bytes, prompt, openai_key),
+        daemon=True,
+    )
+    t.start()
+    _pending_jobs[job_id]["thread"] = t
+
+    logger.debug("Started generation job %s", job_id)
+    return {
+        "job_id": job_id,
+        "status": "generating",
+        "estimated_seconds": 45,
+        "hint": "Poll check_image_status(job_id) every ~10 seconds until complete.",
+    }
+
+
+@tool
+async def check_image_status(
+    job_id: Annotated[str, "Job ID returned by start_cat_image_generation"],
+) -> dict:
+    """Check if an async image generation job has completed.
+
+    Returns status: 'generating', 'complete', or 'failed'.
+    When status is 'complete', the image is stashed server-side — call
+    send_cat_image with image_base64='__last__' to send it to Slack.
+
+    If still generating, call this tool again in ~10 seconds.
+    """
+    job = _pending_jobs.get(job_id)
+    if not job:
+        return {"error": f"Unknown job_id: {job_id}. It may have expired or never existed."}
+
+    thread = job.get("thread")
+    if thread and thread.is_alive():
         return {
-            "error": f"Image generation failed: {e}",
-            "prompt_used": prompt,
-            "style": style,
-            "cat_fact": cat_fact,
+            "job_id": job_id,
+            "status": "generating",
+            "hint": "Image is still being generated. Call again in ~10 seconds.",
         }
 
-    # Stash the full-res image server-side (for send_cat_image and CLI agent)
+    # Thread finished — check for errors
+    if job.get("error"):
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "error": job["error"],
+        }
+
+    if not job.get("result"):
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "error": "Generation completed but no image data was produced.",
+        }
+
+    # Stash the full-res image server-side
+    image_b64 = job["result"]
     _last_generated_image.clear()
     _last_generated_image["base64"] = image_b64
-    _last_generated_image["cat_fact"] = cat_fact
-    _last_generated_image["style"] = style
+    _last_generated_image["cat_fact"] = job.get("cat_fact", "")
+    _last_generated_image["style"] = job.get("style", "")
 
-    # Build a compressed JPEG thumbnail for inline display in Claude Desktop.
-    # Full-res PNG is ~2MB; thumbnail is ~50-100KB.
+    # Build a compressed JPEG thumbnail for inline display
     try:
         preview_b64 = _make_preview_thumbnail(image_b64)
         logger.debug("Preview thumbnail: %d bytes base64", len(preview_b64))
@@ -222,57 +297,15 @@ async def generate_cat_image(
         preview_b64 = None
 
     result = {
-        "success": True,
-        "prompt_used": prompt,
-        "style": style,
-        "cat_fact": cat_fact,
+        "job_id": job_id,
+        "status": "complete",
+        "style": job.get("style", ""),
+        "cat_fact": job.get("cat_fact", ""),
         "image_size_bytes": len(image_b64),
         "hint": "Image stored server-side. Call send_cat_image with image_base64='__last__' to send it to Slack.",
     }
 
-    # _mcp_image is intercepted by our patched convert_to_mcp_content
-    # and emitted as a real MCP ImageContent block, so Claude Desktop
-    # renders it inline instead of dumping base64 text.
     if preview_b64:
         result["_mcp_image"] = {"data": preview_b64, "mimeType": "image/jpeg"}
 
     return result
-
-
-@tool
-async def save_image_locally(
-    image_base64: Annotated[str, "Base64-encoded PNG data, or '__last__' to use the most recently generated image"] = "__last__",
-    cat_fact: Annotated[str, "The cat fact used to generate the image (used in filename)"] = "",
-) -> dict:
-    """Save a generated cat image to a local file.
-
-    Use after generate_cat_image to save the result to disk. Defaults to
-    using the most recently generated image if image_base64 is '__last__'.
-    """
-    if image_base64 == "__last__":
-        if _last_generated_image.get("base64"):
-            image_base64 = _last_generated_image["base64"]
-            cat_fact = cat_fact or _last_generated_image.get("cat_fact", "")
-        else:
-            return {"error": "No image generated yet. Call generate_cat_image first."}
-
-    if not image_base64:
-        return {"error": "No image data provided."}
-
-    try:
-        image_bytes = base64.b64decode(image_base64)
-        output_dir = pathlib.Path(tempfile.gettempdir()) / "meow_art"
-        output_dir.mkdir(exist_ok=True)
-
-        name_hash = hashlib.md5(cat_fact.encode()).hexdigest()[:8]
-        filepath = output_dir / f"meow_art_{name_hash}.png"
-        filepath.write_bytes(image_bytes)
-
-        return {
-            "saved": True,
-            "path": str(filepath),
-            "size_bytes": len(image_bytes),
-            "cat_fact": cat_fact,
-        }
-    except Exception as e:
-        return {"error": f"Failed to save image: {e}"}

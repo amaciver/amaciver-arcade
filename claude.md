@@ -49,6 +49,21 @@ This is an **Arcade.dev Engineering Interview Project** with these requirements:
 
 ## Critical Architecture Patterns
 
+### Two Runtime Modes
+The project supports two modes with different capabilities:
+
+**MCP Server Mode** (Claude Desktop, Cursor) — Full features:
+- Tools run as a local long-running process (`arcade mcp -p meow_me stdio`)
+- Background threads persist → async image generation works
+- Uses local `OPENAI_API_KEY` and `SLACK_BOT_TOKEN` from `.env`
+- Recommended for image generation
+
+**CLI Agent Mode** — Text-only:
+- Agent calls tools remotely via Arcade SDK (`get_arcade_tools()`)
+- Arcade Cloud uses ephemeral workers → background threads lost between calls
+- Image generation (`start_cat_image_generation` + `check_image_status`) does NOT work
+- Agent system prompt explicitly tells the LLM not to call image tools
+
 ### Agent-Tool Separation (Arcade SDK)
 The CLI agent is a **thin LLM client** that calls tools remotely via the Arcade SDK.
 - Agent (`agent.py`) has **zero imports** from `meow_me.tools.*`
@@ -56,18 +71,12 @@ The CLI agent is a **thin LLM client** that calls tools remotely via the Arcade 
 - Agent uses `agents-arcade.get_arcade_tools()` to discover and call tools
 - All tool execution happens on the Arcade platform, not in the agent process
 - Auth is handled entirely by Arcade (OAuth flow managed server-side)
-- **Pre-refactor baseline:** Commit `7a88607` is the last fully-working monolithic version (agent + tools in same process, 138 tests, all features working including image generation)
 
-### Dual Auth Modes
-**Default mode (Arcade OAuth):**
-- Auth managed by Arcade platform (browser-based OAuth)
-- Scopes: `chat:write`, `im:write`, `users:read` (NO `files:write`)
-
-**`--slack` mode (Bot Token):**
-- `SLACK_BOT_TOKEN` passed as env var; MCP tools fall back to it via `_get_token()`
-- All scopes including `files:write`
-- Full Slack integration: direct channel image uploads
-- Requires user resolution (bot token shows bot identity, not user)
+### Auth Model (Single Mode)
+- **Arcade OAuth** handles user identity and basic Slack operations (DMs, text messages)
+- **Optional cloud secrets** (`OPENAI_API_KEY`, `SLACK_BOT_TOKEN`) enhance capabilities when configured
+- No `--slack` flag; auth mode is unified
+- **Dual-token pattern:** OAuth token for user identity, bot token secret (via `_try_get_secret`) for file uploads requiring `files:write`
 
 ### MCP Tool Naming
 **Important:** MCP server exposes tools with namespace prefix in PascalCase:
@@ -88,11 +97,11 @@ Tools access secrets via `context.get_secret("KEY")`, NOT `os.getenv()`.
 - Secrets uploaded during `arcade deploy --secrets all` or via `arcade secret set`
 - `os.getenv()` fallback only works locally (env vars are NOT injected on Arcade Cloud)
 
-### Image Generation Flow
-1. `generate_cat_image` generates full PNG (~2MB) + compressed JPEG thumbnail (~50-100KB)
-2. PNG stored server-side in `_last_generated_image` dict (referenced as `"__last__"`)
-3. JPEG thumbnail sent as MCP `ImageContent` (Claude Desktop has ~1MB limit)
-4. Agent can save PNG locally or upload to Slack
+### Image Generation Flow (Async Start/Poll)
+1. `start_cat_image_generation` kicks off async generation, returns a `job_id` immediately
+2. `check_image_status` polls for completion using the `job_id`
+3. On completion, PNG stashed in `_last_generated_image` dict (referenced as `"__last__"`) and JPEG thumbnail built
+4. Agent uploads to Slack or sends thumbnail via MCP `ImageContent`
 
 ---
 
@@ -142,6 +151,25 @@ Tools access secrets via `context.get_secret("KEY")`, NOT `os.getenv()`.
     - `gpt-image-1` takes 30-60s, exceeds the platform's worker timeout
     - Fast tools (GetCatFact, etc.) work fine
     - Image generation works via local MCP transport (`arcade mcp -p meow_me stdio`)
+
+11. **Ephemeral workers break async start/poll:**
+    - `start_cat_image_generation` starts a background thread on Worker A
+    - `check_image_status` runs on Worker B (fresh process) → `_pending_jobs` is empty → 503
+    - Image generation only works in MCP server mode (long-running process)
+
+12. **Don't gate agent on local env vars for cloud secrets:**
+    - Agent should NOT check `os.getenv("OPENAI_API_KEY")` to decide capabilities
+    - Cloud secrets exist on Arcade Cloud, not in the agent's local environment
+    - Let tools report their own failures; don't preemptively disable features
+
+13. **LLM prompt language must be definitive, not wishy-washy:**
+    - "Available via cloud secrets (tools detect at runtime)" → LLM hedges and refuses
+    - Use either "READY — always attempt" or "Do NOT call" — no middle ground
+    - gpt-4o-mini errs on the side of caution with ambiguous capability descriptions
+
+14. **`arcade deploy --skip-validate` requires `--server-name` and `--server-version`:**
+    - Deploy verification can timeout even when server starts correctly
+    - Use: `arcade deploy -e server.py --skip-validate --server-name meow_me --server-version 0.1.0`
 
 ### Slack API
 
@@ -223,10 +251,17 @@ uv run arcade evals evals/    # Behavioral evals
 from arcade_mcp_server import tool, Context
 from arcade_mcp_server.auth import Slack
 
-@tool(requires_auth=Slack(scopes=["chat:write"]), requires_secrets=["OPENAI_API_KEY"])
+async def _try_get_secret(context: Context, key: str) -> str | None:
+    """Try to get a secret from Arcade Cloud, fall back to env var."""
+    try:
+        return context.get_secret(key)
+    except Exception:
+        return os.getenv(key)
+
+@tool(requires_auth=Slack(scopes=["chat:write"]))
 async def send_message(context: Context, channel: str, message: str):
-    token = context.get_auth_token_or_empty() or os.getenv("SLACK_BOT_TOKEN", "")
-    api_key = context.get_secret("OPENAI_API_KEY")  # Arcade Cloud injects via requires_secrets
+    token = context.get_auth_token_or_empty()
+    bot_token = await _try_get_secret(context, "SLACK_BOT_TOKEN")  # Optional enhancement
     # ... implementation ...
     return {"success": True}
 ```
@@ -268,7 +303,6 @@ OPENAI_API_KEY=sk-...          # gpt-4o-mini (agent) + gpt-image-1 (images)
 ARCADE_API_KEY=arc-...         # Required: connects agent to Arcade-deployed tools
 
 # Optional
-SLACK_BOT_TOKEN=xoxb-...       # Direct bot token (requires --slack flag)
 ARCADE_USER_ID=you@email.com   # Skip email prompt in Arcade flow
 ```
 
@@ -282,12 +316,11 @@ cd meow_me
 # Demo (no API keys)
 uv run python -m meow_me --demo
 
-# Agent modes
+# Agent mode
 uv run python -m meow_me              # Arcade OAuth
-uv run python -m meow_me --slack      # Bot token
 
 # Testing
-uv run pytest -v                      # All 128 unit tests
+uv run pytest -v                      # All 137 unit tests
 uv run arcade evals evals/            # All 12 evaluations
 
 # MCP server
@@ -307,9 +340,9 @@ meow_me/
 │   └── tools/
 │       ├── facts.py        # get_cat_fact
 │       ├── avatar.py       # get_user_avatar
-│       ├── image.py        # generate_cat_image, save_image_locally
+│       ├── image.py        # start_cat_image_generation, check_image_status (async pattern)
 │       └── slack.py        # meow_me, send_cat_fact, send_cat_image
-├── tests/                  # 128 pytest unit tests
+├── tests/                  # 137 pytest unit tests
 ├── evals/                  # 12 Arcade evaluations
 └── examples/               # Sample generated images
 ```
@@ -318,10 +351,11 @@ meow_me/
 
 ## Known Limitations
 
-1. **Arcade Cloud worker timeout** - `gpt-image-1` takes 30-60s, exceeds Arcade Cloud's ~30s worker timeout. Image generation works locally via `arcade mcp` but times out when deployed. Agent falls back to text-only delivery gracefully.
-2. **Arcade OAuth lacks `files:write`** - Image uploads require `SLACK_BOT_TOKEN`
-3. **Claude Desktop ~1MB MCP content limit** - Send JPEG thumbnail, not full PNG
-4. **Image generation time** - gpt-image-1 takes 30-60 seconds per image
+1. **Image generation requires MCP server mode** - Async start/poll uses background threads + in-memory state. Arcade Cloud's ephemeral workers lose both between calls. Use Claude Desktop or Cursor for image generation.
+2. **CLI agent is text-only** - When running via Arcade Cloud, only text tools work (GetCatFact, SendCatFact, MeowMe text fallback). Agent system prompt explicitly gates image tools.
+3. **Arcade OAuth lacks `files:write`** - Image uploads require `SLACK_BOT_TOKEN` configured as a cloud secret or local env var
+4. **Claude Desktop ~1MB MCP content limit** - Send JPEG thumbnail, not full PNG
+5. **Image generation time** - gpt-image-1 takes 30-60 seconds per image
 
 ---
 
@@ -331,4 +365,4 @@ See [meow_me/DEVELOPMENT_NOTES.md](meow_me/DEVELOPMENT_NOTES.md) for session-by-
 
 ---
 
-**Last Updated:** Session 7 (Agent-Tool Separation via Arcade Cloud Deployment)
+**Last Updated:** Session 8 (Cloud-First Optimization)

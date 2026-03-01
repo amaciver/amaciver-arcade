@@ -39,7 +39,7 @@ async def meow_me_eval_suite() -> EvalSuite:
             "When the user asks for cat facts, use get_cat_fact.\n"
             "When they want their avatar, use get_user_avatar.\n"
             "When they want cat art, you'll need to get a fact and avatar first, "
-            "then use generate_cat_image.\n"
+            "then use start_cat_image_generation to begin async generation.\n"
             "The special phrase 'Meow me!' is a one-shot command that does everything: "
             "fact + avatar + image + DM."
         ),
@@ -164,16 +164,16 @@ async def meow_me_eval_suite() -> EvalSuite:
     )
 
     # ========================================================================
-    # CASE 5: Generate cat image (requires fact + avatar context)
+    # CASE 5: Start cat image generation (requires fact + avatar context)
     # ========================================================================
     # Note: This requires multi-turn conversation or expects the model to
     # call get_cat_fact and get_user_avatar first
     suite.add_case(
-        name="Generate cat art with context",
+        name="Start cat art generation with context",
         user_message="Now make cat art from that",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "MeowMe_GenerateCatImage",
+                "MeowMe_StartCatImageGeneration",
                 {
                     "cat_fact": "Cats can rotate their ears 180 degrees.",
                     "avatar_url": "https://avatars.slack-edge.com/test.png",
